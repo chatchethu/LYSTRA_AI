@@ -2,11 +2,16 @@ from typing import List
 from .schemas import MemoryObject
 from .memory_ranker import MemoryRanker
 
+import structlog
+
+logger = structlog.get_logger(__name__)
+
 class MemoryRetriever:
     """
     Phase 12: Memory Retrieval execution layer.
     """
     def __init__(self, llm_gateway, storage_backend):
+        self.llm = llm_gateway
         self.ranker = MemoryRanker(llm_gateway)
         self.storage = storage_backend
 
@@ -34,9 +39,20 @@ class MemoryRetriever:
         if not memory_required:
             return []
 
-        # 1. Fetch all raw active memories for user from DB
-        # Phase 15: Privacy Boundaries - fetch_active_memories uses user_id strictly.
-        raw_memories = await self.storage.fetch_active_memories(user_id)
+        # RAG Vector Search Pipeline
+        try:
+            query_embedding = await self.llm.embed(current_request)
+            # Fetch top 20 most semantically similar memories
+            raw_memories = await self.storage.search_by_embedding(user_id, query_embedding, limit=20)
+            
+            # Fallback to fetching all active if vector search yields nothing 
+            # (e.g. for legacy memories without embeddings yet)
+            if not raw_memories:
+                raw_memories = await self.storage.fetch_active_memories(user_id)
+        except Exception as e:
+            logger.warning("rag_search_failed_falling_back", error=str(e))
+            raw_memories = await self.storage.fetch_active_memories(user_id)
+            
         if not raw_memories:
             return []
             

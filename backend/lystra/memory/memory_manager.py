@@ -68,6 +68,17 @@ class DBMemoryStorage:
         except Exception:
             raise
 
+    async def search_by_embedding(self, user_id: str, embedding: list[float], limit: int = 20):
+        async with self._session() as db:
+            mems = await crud_memory.search_by_embedding(
+                db, 
+                user_id=uuid.UUID(str(user_id)), 
+                query_embedding=embedding, 
+                limit=limit, 
+                threshold=0.6  # slightly loose threshold to allow ranker to filter
+            )
+            return mems
+
     async def fetch_active_memories(self, user_id):
         async with self._session() as db:
             now = datetime.now(timezone.utc)
@@ -149,6 +160,8 @@ class DBMemoryStorage:
                 "canonical_key": memory.key,
                 "memory_type": memory.type.value if hasattr(memory.type, "value") else memory.type
             }
+            if memory.embedding is not None:
+                update_data["embedding"] = memory.embedding
             await crud_memory.update_memory_row(db, uuid.UUID(str(memory.id)), update_data)
             await self._audit(db, memory.user_id, "memory_updated", memory.id)
             await db.commit()
@@ -174,7 +187,8 @@ class DBMemoryStorage:
                 content=content_str,
                 importance=memory.importance,
                 confidence=memory.confidence,
-                canonical_key=memory.key
+                canonical_key=memory.key,
+                embedding=memory.embedding
             )
             mem = await crud_memory.create(db, obj_in=obj_in)
             await self._audit(db, memory.user_id, "memory_created", mem.id)
@@ -215,7 +229,15 @@ class MemoryManager:
         # Improve "forget" intent check
         msg_lower = message.lower()
         if "forget" in msg_lower.split() or "do not remember" in msg_lower or "delete that" in msg_lower:
-            existing_memories = await self.storage.fetch_active_memories(user_id)
+            # RAG: Only fetch memories related to what we are trying to forget
+            try:
+                forget_embedding = await self.extractor.llm.embed(message)
+                existing_memories = await self.storage.search_by_embedding(user_id, forget_embedding, limit=20)
+                if not existing_memories:
+                    existing_memories = await self.storage.fetch_active_memories(user_id)
+            except Exception as e:
+                logger.warning("rag_forget_search_failed", error=str(e))
+                existing_memories = await self.storage.fetch_active_memories(user_id)
             
             # Use real MemoryObject
             candidate = MemoryObject(
@@ -240,7 +262,16 @@ class MemoryManager:
                 return
 
         # Fetch memories once and reuse (Fix redundant fetch)
-        existing_memories = await self.storage.fetch_active_memories(user_id)
+        # RAG: Use vector search to find only relevant memories for conflict resolution 
+        # instead of loading the user's entire life history into memory.
+        try:
+            query_embedding = await self.extractor.llm.embed(message)
+            existing_memories = await self.storage.search_by_embedding(user_id, query_embedding, limit=20)
+            if not existing_memories:
+                existing_memories = await self.storage.fetch_active_memories(user_id)
+        except Exception as e:
+            logger.warning("rag_conflict_search_failed", error=str(e))
+            existing_memories = await self.storage.fetch_active_memories(user_id)
 
         candidate = await self.extractor.extract_candidate_memory(user_id, message, context_history)
         if candidate:
@@ -251,8 +282,21 @@ class MemoryManager:
                 # Ensure the resolved memory retains the conflict ID so it actually updates
                 if not resolved.id:
                     resolved.id = conflict.id
+                
+                # RAG: Generate embedding for the updated memory
+                try:
+                    resolved.embedding = await self.extractor.llm.embed(str(resolved.value))
+                except Exception as e:
+                    logger.warning("memory_embedding_failed", error=str(e))
+                    
                 await self.storage.update_memory(resolved)
             else:
+                # RAG: Generate embedding for the new memory
+                try:
+                    candidate.embedding = await self.extractor.llm.embed(str(candidate.value))
+                except Exception as e:
+                    logger.warning("memory_embedding_failed", error=str(e))
+                    
                 await self.storage.add_memory(candidate)
                 
             # Phase 23: Memory Consolidation

@@ -1,4 +1,4 @@
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
 *.class
@@ -12,6 +12,7 @@ node_modules/
 dist/
 build/
 .npm/
+.next/
 
 # OS
 .DS_Store

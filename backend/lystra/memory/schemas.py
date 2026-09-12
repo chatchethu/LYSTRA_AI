@@ -58,3 +58,6 @@ class MemoryObject(BaseModel):
     
     status: MemoryStatus = Field(default=MemoryStatus.CANDIDATE)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    
+    # RAG Support
+    embedding: Optional[list[float]] = None

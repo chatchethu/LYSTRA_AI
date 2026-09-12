@@ -15,6 +15,7 @@ class MemoryBase(BaseModel):
     source_message_id: Optional[UUID] = None
     task_id: Optional[UUID] = None
     status: str = "active"
+    embedding: Optional[list[float]] = None
 class MemoryCreate(MemoryBase):
     user_id: UUID
 
@@ -29,6 +30,7 @@ class MemoryUpdate(BaseModel):
     source_message_id: Optional[UUID] = None
     task_id: Optional[UUID] = None
     status: Optional[str] = None
+    embedding: Optional[list[float]] = None
 
 class MemoryResponse(MemoryBase):
     id: UUID
