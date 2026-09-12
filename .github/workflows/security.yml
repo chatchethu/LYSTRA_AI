@@ -1,0 +1,34 @@
+name: Security Audit & Red Team
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: "0 0 * * *" # Daily continuous red-teaming (Phase 101)
+
+jobs:
+  security-scans:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt bandit pip-audit pytest httpx
+
+      - name: Run Bandit (SAST)
+        run: bandit -r backend/ -ll
+
+      - name: Run Pip-Audit (SCA)
+        run: pip-audit
+
+      - name: Continuous Red Team (Phase 101)
+        # Executes the boundary tests for SSRF, Prompt Injection, Context Poisoning
+        run: pytest backend/tests/test_red_team.py
+

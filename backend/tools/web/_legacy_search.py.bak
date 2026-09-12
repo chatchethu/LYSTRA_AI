@@ -1,0 +1,201 @@
+"""
+Web Search Tool — NOVA AI
+
+Search pipeline:
+  1. Firecrawl search (primary) — rich content, web + news results
+  2. DuckDuckGo news (fallback) — if Firecrawl unavailable
+  3. DuckDuckGo text (last resort)
+
+Runs all sync calls in a ThreadPoolExecutor to avoid blocking asyncio.
+"""
+
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from backend.tools import BaseTool, registry
+
+_executor = ThreadPoolExecutor(max_workers=4)
+
+
+def _firecrawl_search(query: str, max_results: int, api_key: str) -> list[dict]:
+    """Search using Firecrawl API — returns richly scraped web results."""
+    from firecrawl import FirecrawlApp
+    app = FirecrawlApp(api_key=api_key)
+    result = app.search(query, limit=max_results)
+
+    items = []
+
+    # News results (most relevant for current events)
+    if result.news:
+        for n in result.news[:max_results]:
+            items.append({
+                "type": "news",
+                "title": getattr(n, "title", ""),
+                "url": getattr(n, "url", ""),
+                "body": getattr(n, "description", "") or getattr(n, "snippet", ""),
+                "date": getattr(n, "date", "") or getattr(n, "published_date", ""),
+                "source": getattr(n, "source", ""),
+            })
+
+    # Web results (for deeper content)
+    if result.web:
+        for w in result.web[:max_results]:
+            desc = getattr(w, "description", "") or ""
+            items.append({
+                "type": "web",
+                "title": getattr(w, "title", ""),
+                "url": getattr(w, "url", ""),
+                "body": desc[:500] if desc else "",
+                "source": getattr(w, "url", "").split("/")[2] if getattr(w, "url", "") else "",
+            })
+
+    return items
+
+
+def _ddgs_search(query: str, max_results: int) -> tuple[str, list]:
+    """Fallback: DuckDuckGo news → text search."""
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError:
+        return ("error", [])
+        
+    ddgs = DDGS()
+    news = ddgs.news(query, max_results=max_results)
+    if news:
+        return ("news", news)
+    text = ddgs.text(query, max_results=max_results)
+    return ("text", text or [])
+
+
+def _run_search(query: str, max_results: int, api_key: str | None) -> dict:
+    """Main search dispatcher — runs sync in thread, returns structured dict."""
+    formatted = []
+    source_used = ""
+    sources_data = []
+
+    # --- Try Firecrawl first ---
+    if api_key:
+        try:
+            items = _firecrawl_search(query, max_results, api_key)
+            if items:
+                source_used = "Firecrawl"
+                news_items = [i for i in items if i["type"] == "news"]
+                web_items = [i for i in items if i["type"] == "web"]
+                
+                for item in items[:max_results]:
+                    domain = ""
+                    if item.get("url"):
+                        try:
+                            domain = item["url"].split("/")[2]
+                        except:
+                            domain = "web"
+                    sources_data.append({
+                        "title": item.get("title") or "Web Page",
+                        "url": item.get("url") or "",
+                        "domain": item.get("source") or domain
+                    })
+
+                if news_items:
+                    formatted.append("=== LIVE NEWS RESULTS ===\n")
+                    for i, n in enumerate(news_items[:max_results], 1):
+                        line = f"[{i}] {n['title']}"
+                        if n.get("date"):
+                            line += f"  ({n['date'][:10]})"
+                        if n.get("source"):
+                            line += f"  — {n['source']}"
+                        if n.get("body"):
+                            line += f"\n    {n['body'][:400]}"
+                        if n.get("url"):
+                            line += f"\n    🔗 {n['url']}"
+                        formatted.append(line)
+
+                if web_items and not news_items:
+                    formatted.append("=== WEB RESULTS ===\n")
+                    for i, w in enumerate(web_items[:max_results], 1):
+                        line = f"[{i}] {w['title']}"
+                        if w.get("body"):
+                            line += f"\n    {w['body'][:400]}"
+                        if w.get("url"):
+                            line += f"\n    🔗 {w['url']}"
+                        formatted.append(line)
+
+        except Exception as e:
+            print(f"[FIRECRAWL] Error: {e}, falling back to DuckDuckGo")
+
+    # --- DuckDuckGo fallback ---
+    if not formatted:
+        try:
+            result_type, results = _ddgs_search(query, max_results)
+            source_used = "DuckDuckGo"
+            if results:
+                header = "=== LIVE NEWS ===" if result_type == "news" else "=== WEB RESULTS ==="
+                formatted.append(header + "\n")
+                for i, r in enumerate(results[:max_results], 1):
+                    title = r.get('title','')
+                    url = r.get('url') or r.get('href', '')
+                    domain = "web"
+                    if url:
+                        try:
+                            domain = url.split("/")[2]
+                        except:
+                            pass
+                            
+                    sources_data.append({
+                        "title": title or "Web Page",
+                        "url": url,
+                        "domain": r.get('source') or domain
+                    })
+                    
+                    if result_type == "news":
+                        line = f"[{i}] {title}"
+                        if r.get("date"):
+                            line += f"  ({str(r['date'])[:10]})"
+                        if r.get("source"):
+                            line += f"  — {r['source']}"
+                        if r.get("body"):
+                            line += f"\n    {r['body'][:350]}"
+                        if url:
+                            line += f"\n    🔗 {url}"
+                    else:
+                        line = f"[{i}] {title}\n    {r.get('body','')[:350]}\n    🔗 {url}"
+                    formatted.append(line)
+        except Exception as e:
+            return {"error": f"Search failed: {e}"}
+
+    if not formatted:
+        return {"error": "No results found for that query."}
+
+    footer = f"\n\n[Source: {source_used}]"
+    formatted_str = "\n\n".join(formatted) + footer
+    return {"formatted": formatted_str, "sources": sources_data}
+
+
+class WebSearchTool(BaseTool):
+    name: str = "web_search"
+    description: str = "Search the web for real-time news, current events, prices, scores, and live information using Firecrawl and DuckDuckGo."
+    def get_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query."},
+                "max_results": {"type": "integer", "description": "Max results (default: 5)", "default": 5}
+            },
+            "required": ["query"]
+        }
+
+    async def execute(self, user_id, query: str, task_id=None, conversation_id=None, request_id=None, max_results: int = 5, **kwargs):
+        try:
+            from backend.config import get_settings
+            settings = get_settings()
+            api_key = settings.FIRECRAWL_API_KEY or None
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                _executor, _run_search, query, max_results, api_key
+            )
+            return result
+        except Exception as e:
+            return f"Search failed: {str(e)}"
+
+
+# Register the tool
+registry.register(WebSearchTool())

@@ -1,0 +1,65 @@
+{
+  "dataset_version": "1.0",
+  "scenarios": [
+    {
+      "id": "ws_eval_001",
+      "category": "requires_search",
+      "query": "What was the final score of the Super Bowl this year?",
+      "expected_behavior": "Trigger search, return exact score with citations."
+    },
+    {
+      "id": "ws_eval_002",
+      "category": "does_not_require_search",
+      "query": "What is 2+2?",
+      "expected_behavior": "Answer directly without executing web search."
+    },
+    {
+      "id": "ws_eval_003",
+      "category": "latest_query",
+      "query": "What is the USD to INR exchange rate right now?",
+      "expected_behavior": "Trigger search, bypass cache for freshness, return current rate concisely."
+    },
+    {
+      "id": "ws_eval_004",
+      "category": "current_query",
+      "query": "Who is the current Prime Minister of the UK?",
+      "expected_behavior": "Trigger search, return correctly identified PM with citation."
+    },
+    {
+      "id": "ws_eval_005",
+      "category": "historical_query",
+      "query": "Who won the 1994 World Cup?",
+      "expected_behavior": "Answer from internal knowledge or search history correctly."
+    },
+    {
+      "id": "ws_eval_006",
+      "category": "ambiguous_query",
+      "query": "Is Apple doing well today?",
+      "expected_behavior": "Search financial news for Apple Inc, provide summary."
+    },
+    {
+      "id": "ws_eval_007",
+      "category": "multi_query_research",
+      "query": "Compare the battery life of iPhone 17 and Samsung S26.",
+      "expected_behavior": "Execute parallel queries, return comparison table and summary."
+    },
+    {
+      "id": "ws_eval_008",
+      "category": "source_disagreement",
+      "query": "Is coffee good for you?",
+      "expected_behavior": "Acknowledge conflicting studies, provide balanced summary."
+    },
+    {
+      "id": "ws_eval_009",
+      "category": "source_verification",
+      "query": "Provide a summary of the latest AI legislation in the EU.",
+      "expected_behavior": "Ensure claims match retrieved text accurately without hallucination."
+    },
+    {
+      "id": "ws_eval_010",
+      "category": "citation",
+      "query": "What is the population of Tokyo?",
+      "expected_behavior": "Provide the population figure with an inline [src_1] tag linked to a valid URL."
+    }
+  ]
+}
