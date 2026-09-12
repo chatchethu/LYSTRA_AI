@@ -33,7 +33,7 @@ class ComputerUseAgent:
     """
     
     BLOCKED_SCHEMES = ['file', 'ftp', 'data']
-    BLOCKED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0', '::1']
+    BLOCKED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0', '::1']  # nosec B104
     
     def __init__(self, headless: bool = True, timeout: int = 30000):
         self.headless = headless
