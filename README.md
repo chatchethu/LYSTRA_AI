@@ -280,13 +280,12 @@ personal-agent/
 - ✅ **Task resumption** — pause, resume, cancel tasks
 - ✅ **Human-in-the-loop approval** for high-risk actions
 
-### Memory System
-- ✅ **Short-term memory** — sliding context window with summarization
-- ✅ **Long-term memory** — persistent facts, preferences, projects
-- ✅ **Semantic search** — pgvector similarity search
-- ✅ **Knowledge graph** — entity relationships
-- ✅ **User profile** — structured personal information
-- ✅ **Auto memory extraction** from conversations
+### 🧠 Advanced RAG Memory Architecture
+- ✅ **Vector-Augmented Retrieval (RAG)** — Automatically generates dense vector embeddings (via `nomic-embed-text`) for extracted facts and preferences. Uses PostgreSQL (`pgvector`) cosine distance search to retrieve only the most highly relevant context for any given message, bypassing token limits.
+- ✅ **Smart Conflict Resolution** — Uses RAG vector search to instantly find and resolve contradicting facts (e.g., updating your favorite framework) rather than polluting context with duplicates.
+- ✅ **Short-term memory** — Sliding context window with dynamic summarization.
+- ✅ **Long-term memory** — Persistent facts, preferences, and projects safely isolated per user.
+- ✅ **Auto-extraction** — Automatically pulls user preferences, rules, and facts directly from natural conversations without manual commands.
 
 ### Tools (12+)
 | Tool | Description | Risk |
