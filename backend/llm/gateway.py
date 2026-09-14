@@ -180,7 +180,18 @@ class LLMGateway:
         task_id = kwargs.pop("task_id", None)
 
         settings = get_settings()
-        primary_model = model or settings.OLLAMA_CHAT_MODEL
+        if not model:
+            # check operation name (it might be passed as an argument or we infer it)
+            # In stream it is not passed as an argument named operation, so we check if the function is embed
+            # But wait, stream is only for chat.
+            if "operation" in locals() and locals().get("operation") == "embed":
+                primary_model = settings.OLLAMA_EMBEDDING_MODEL
+            elif "operation" in locals() and locals().get("operation") == "vision":
+                primary_model = settings.OLLAMA_VISION_MODEL
+            else:
+                primary_model = settings.OLLAMA_CHAT_MODEL
+        else:
+            primary_model = model
         fallback_model = self._router.get_fallback_model(primary_model) if self._router else None
 
         models_to_try = [(primary_model, False)]
@@ -293,7 +304,18 @@ class LLMGateway:
         task_id = kwargs.pop("task_id", None)
 
         settings = get_settings()
-        primary_model = model or settings.OLLAMA_CHAT_MODEL
+        if not model:
+            # check operation name (it might be passed as an argument or we infer it)
+            # In stream it is not passed as an argument named operation, so we check if the function is embed
+            # But wait, stream is only for chat.
+            if "operation" in locals() and locals().get("operation") == "embed":
+                primary_model = settings.OLLAMA_EMBEDDING_MODEL
+            elif "operation" in locals() and locals().get("operation") == "vision":
+                primary_model = settings.OLLAMA_VISION_MODEL
+            else:
+                primary_model = settings.OLLAMA_CHAT_MODEL
+        else:
+            primary_model = model
         fallback_model = self._router.get_fallback_model(primary_model) if self._router else None
 
         models_to_try = [(primary_model, False)]
