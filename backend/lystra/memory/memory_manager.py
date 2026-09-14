@@ -49,6 +49,45 @@ class DBMemoryStorage:
         except Exception:
             raise
 
+    def _map_db_to_objects(self, mems: List[Memory]) -> List[MemoryObject]:
+        LEGACY_TYPE_MAP = {
+            "statement":    MemoryType.CONTEXT.value,
+            "fact":         MemoryType.CONTEXT.value,
+            "task":         MemoryType.RECURRING_TASK.value,
+            "emotion":      MemoryType.CONTEXT.value,
+            "constraint":   MemoryType.PREFERENCE.value,
+            "decision":     MemoryType.CONTEXT.value,
+            "communication": MemoryType.COMMUNICATION.value,
+        }
+
+        objs = []
+        for m in mems:
+            try:
+                raw_type = m.memory_type or ""
+                remapped_type = LEGACY_TYPE_MAP.get(raw_type, raw_type)
+                mem_type = MemoryType(remapped_type) if remapped_type else MemoryType.PREFERENCE
+                
+                # RAG: Safely transfer the embedding vector if it exists
+                # In newer async pgvector, it might be an ndarray or list, converting to list
+                emb = m.embedding.tolist() if hasattr(m.embedding, "tolist") else m.embedding
+                
+                obj = MemoryObject(
+                    id=str(m.id),
+                    user_id=str(m.user_id),
+                    type=mem_type,
+                    key=m.canonical_key or m.content[:50],
+                    value=m.content,
+                    confidence=m.confidence,
+                    importance=m.importance,
+                    source="user_explicit",
+                    status="active",
+                    embedding=emb
+                )
+                objs.append(obj)
+            except Exception as e:
+                logger.warning("memory_conversion_failed", memory_id=str(m.id), error=str(e))
+        return objs
+
     async def search_by_embedding(self, user_id: str, embedding: list[float], limit: int = 20):
         async with self._session() as db:
             mems = await crud_memory.search_by_embedding(
@@ -56,14 +95,13 @@ class DBMemoryStorage:
                 user_id=uuid.UUID(str(user_id)), 
                 query_embedding=embedding, 
                 limit=limit, 
-                threshold=0.6  # slightly loose threshold to allow ranker to filter
+                threshold=0.6
             )
-            return mems
+            return self._map_db_to_objects(mems)
 
     async def fetch_active_memories(self, user_id):
         async with self._session() as db:
             now = datetime.now(timezone.utc)
-            # Fix #6: SQL filtering instead of Python loop filtering
             stmt = select(Memory).where(
                 Memory.user_id == uuid.UUID(str(user_id)),
                 Memory.status.in_(["active", "validated", "updated"]),
@@ -71,42 +109,7 @@ class DBMemoryStorage:
             )
             result = await db.execute(stmt)
             mems = result.scalars().all()
-
-            # Map legacy memory_type values that were stored under an older enum
-            # to the closest current MemoryType value, so old DB rows don't crash.
-            LEGACY_TYPE_MAP = {
-                "statement":    MemoryType.CONTEXT.value,
-                "fact":         MemoryType.CONTEXT.value,
-                "task":         MemoryType.RECURRING_TASK.value,
-                "emotion":      MemoryType.CONTEXT.value,
-                "constraint":   MemoryType.PREFERENCE.value,
-                "decision":     MemoryType.CONTEXT.value,
-                "communication": MemoryType.COMMUNICATION.value,
-            }
-
-            objs = []
-            for m in mems:
-                try:
-                    raw_type = m.memory_type or ""
-                    # Remap legacy value → current enum value if needed
-                    remapped_type = LEGACY_TYPE_MAP.get(raw_type, raw_type)
-                    mem_type = MemoryType(remapped_type) if remapped_type else MemoryType.PREFERENCE
-                    obj = MemoryObject(
-                        id=str(m.id),
-                        user_id=str(m.user_id),
-                        type=mem_type,
-                        key=m.canonical_key or m.content[:50],  # Fix: Use real canonical_key or fallback
-                        value=m.content,
-                        confidence=m.confidence,
-                        importance=m.importance,
-                        source="user_explicit",
-                        status="active"
-                    )
-                    objs.append(obj)
-                except Exception as e:
-                    # Fix #7: Real logging instead of silent pass
-                    logger.warning("memory_conversion_failed", memory_id=str(m.id), error=str(e))
-            return objs
+            return self._map_db_to_objects(mems)
 
     async def _audit(self, db, user_id, action, memory_id=None, details=None):
         """Phase 39: Audit Logging"""

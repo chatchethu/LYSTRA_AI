@@ -78,8 +78,8 @@ class ExecutionManager:
             await asyncio.wait(self._background_tasks, timeout=10)
             
         try:
-            if hasattr(self.memory_mgr.storage, "dispose"):
-                await self.memory_mgr.storage.dispose()
+            if hasattr(self.memory_manager.storage, "dispose"):
+                await self.memory_manager.storage.dispose()
         except Exception as e:
             logger.error("memory_storage_dispose_failed", error=str(e))
 
