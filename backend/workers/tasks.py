@@ -135,6 +135,12 @@ async def _process_chat_async(chat_request_dict: dict, user_id: str, conversatio
         raise # Let Celery see the failure, trigger retry/alerting
     finally:
         try:
+            if 'execution_manager' in locals():
+                await execution_manager.shutdown()
+        except Exception as cleanup_err:
+            logger.warning("execution_manager_shutdown_failed", exc_info=True)
+            
+        try:
             if 'local_engine' in locals():
                 await local_engine.dispose()
         except Exception as cleanup_err:

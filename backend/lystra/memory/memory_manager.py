@@ -22,48 +22,29 @@ logger = structlog.get_logger(__name__)
 
 class DBMemoryStorage:
     """
-    All DB sessions in this class use a fresh NullPool engine per call.
-
-    Why NOT AsyncSessionLocal (the global engine)?
-    ------------------------------------------------
-    Celery workers run each task via asyncio.run(), which creates a brand-new
-    event loop for every task. The global engine uses a connection pool whose
-    connections are bound to the event loop that was active at import time
-    (or the first time the pool was used). When a new asyncio.run() call
-    starts, those pooled connections are stale and throw:
-      - 'NoneType' object has no attribute 'send'
-      - RuntimeError: Event loop is closed  (on pool teardown)
-
-    NullPool creates and closes a real TCP connection per session — no
-    pooling, no loop-affinity — which works correctly in every asyncio.run()
-    context.
+    Task-scoped database storage.
+    Uses an instance-level engine (QueuePool) to prevent TCP exhaustion on Windows.
+    Must be explicitly disposed at the end of the task to prevent connection leaks
+    and WinError 64 (due to event loop rotation in Celery).
     """
 
-    _loop_engines = {}
+    def __init__(self):
+        settings = get_settings()
+        self.engine = create_async_engine(
+            settings.DATABASE_URL, 
+            pool_size=5, 
+            pool_pre_ping=True
+        )
+        self.LocalSession = async_sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def dispose(self):
+        """Must be called to close the DB engine connections before the event loop closes."""
+        await self.engine.dispose()
 
     @asynccontextmanager
     async def _session(self):
-        """
-        Yields an AsyncSession using an engine that is securely bound to the 
-        CURRENT asyncio event loop. This avoids the Celery "Event loop is closed" 
-        crash, while utilizing a QueuePool to prevent TCP port exhaustion (WinError 64) 
-        caused by NullPool rapidly opening/closing sockets.
-        """
-        loop = asyncio.get_running_loop()
-        if loop not in self._loop_engines:
-            settings = get_settings()
-            # Use a small QueuePool per loop
-            engine = create_async_engine(
-                settings.DATABASE_URL, 
-                pool_size=5, 
-                pool_pre_ping=True
-            )
-            self._loop_engines[loop] = engine
-            
-        engine = self._loop_engines[loop]
-        LocalSession = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
         try:
-            async with LocalSession() as session:
+            async with self.LocalSession() as session:
                 yield session
         except Exception:
             raise

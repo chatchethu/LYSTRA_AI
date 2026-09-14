@@ -76,6 +76,12 @@ class ExecutionManager:
         if self._background_tasks:
             logger.info("draining_background_tasks", count=len(self._background_tasks))
             await asyncio.wait(self._background_tasks, timeout=10)
+            
+        try:
+            if hasattr(self.memory_mgr.storage, "dispose"):
+                await self.memory_mgr.storage.dispose()
+        except Exception as e:
+            logger.error("memory_storage_dispose_failed", error=str(e))
 
     def _spawn_background_task(self, coro, task_name: str = "background_task"):
         task = asyncio.create_task(coro, name=task_name)
