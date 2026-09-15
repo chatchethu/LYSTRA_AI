@@ -125,27 +125,69 @@ class DocumentParser:
 
     @staticmethod
     def _parse_spreadsheet(file_bytes: bytes, category: str) -> str:
-        # Phase 8: Excel / XLSX Intelligence
+        # Phase 8, 10, 11: Excel & CSV Intelligence
         if category == "csv":
-            df = pd.read_csv(io.BytesIO(file_bytes))
+            import csv
+            import chardet
+            detection = chardet.detect(file_bytes)
+            encoding = detection.get("encoding") or "utf-8"
+            decoded = file_bytes.decode(encoding, errors="replace")
+            
+            sniffer = csv.Sniffer()
+            has_header = True
+            dialect = None
+            try:
+                dialect = sniffer.sniff(decoded[:1024])
+                has_header = sniffer.has_header(decoded[:1024])
+            except Exception:
+                pass
+                
+            df = pd.read_csv(io.StringIO(decoded), header=0 if has_header else None, sep=dialect.delimiter if dialect else ",")
+            types = {str(k): str(v) for k, v in df.dtypes.items()}
+            missing = int(df.isna().sum().sum())
+            
             return json.dumps({
                 "type": "csv",
-                "Workbook": [{"Sheet": "CSV Data", "headers": list(df.columns), "rows": len(df), "formulas": False, "content": df.to_markdown(index=False)}]
+                "metadata": {
+                    "encoding": encoding,
+                    "delimiter": dialect.delimiter if dialect else ",",
+                    "has_header": has_header,
+                    "columns": len(df.columns),
+                    "rows": len(df),
+                    "missing_values": missing,
+                    "types": types
+                },
+                "Workbook": [{"Sheet": "CSV Data", "headers": list(df.columns) if has_header else [], "rows": len(df), "content": df.to_markdown(index=False)}]
             }, indent=2)
             
         import openpyxl
-        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
+        # Phase 10: Spreadsheet Formula Understanding
+        wb_f = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
+        wb_v = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
         sheets = []
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet_name)
+        for sheet_name in wb_f.sheetnames:
+            ws_f = wb_f[sheet_name]
+            ws_v = wb_v[sheet_name]
             
+            formula_cells = []
+            for row in ws_f.iter_rows():
+                for cell in row:
+                    if cell.data_type == "f":
+                        val_cell = ws_v.cell(row=cell.row, column=cell.column)
+                        formula_cells.append({
+                            "cell": cell.coordinate,
+                            "formula": str(cell.value),
+                            "raw_value": str(val_cell.value)
+                        })
+                        
+            df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet_name)
             sheet_obj = {
                 "Sheet": sheet_name,
                 "headers": list(df.columns) if not df.empty else [],
                 "rows": len(df),
-                "formulas": True, # Preserved structural property
-                "content": df.head(100).to_markdown(index=False) # cap large sheets for token limits
+                "formulas_found": len(formula_cells),
+                "sample_formulas": formula_cells[:10],
+                "content": df.head(100).to_markdown(index=False)
             }
             sheets.append(sheet_obj)
             
@@ -156,16 +198,39 @@ class DocumentParser:
 
     @staticmethod
     def _parse_pptx(file_bytes: bytes) -> str:
+        # Phase 12: PowerPoint Intelligence
         from pptx import Presentation
         prs = Presentation(io.BytesIO(file_bytes))
         sections = []
         for i, slide in enumerate(prs.slides):
-            slide_text = []
+            slide_content = []
+            
+            if slide.shapes.title and slide.shapes.title.text:
+                slide_content.append(f"Title: {slide.shapes.title.text}")
+                
             for shape in slide.shapes:
-                if hasattr(shape, "text"):
-                    slide_text.append(shape.text)
-            if slide_text:
-                sections.append({"title": f"Slide {i + 1}", "content": "\n".join(slide_text)})
+                if shape == slide.shapes.title:
+                    continue
+                if hasattr(shape, "text") and shape.text:
+                    slide_content.append(shape.text)
+                if shape.has_table:
+                    slide_content.append("[TABLE]")
+                    for row in shape.table.rows:
+                        row_data = [cell.text.strip().replace("\n", " ") for cell in row.cells]
+                        slide_content.append(" | ".join(row_data))
+                if shape.has_chart:
+                    slide_content.append(f"[CHART: {shape.chart.chart_type}]")
+                    
+            if slide.has_notes_slide and slide.notes_slide.notes_text_frame.text:
+                slide_content.append(f"\n--- Speaker Notes ---\n{slide.notes_slide.notes_text_frame.text}")
+                
+            if slide_content:
+                sections.append({
+                    "title": f"Slide {i + 1}", 
+                    "slide_number": i + 1,
+                    "content": "\n".join(slide_content)
+                })
+                
         return json.dumps({"type": "pptx", "sections": sections}, indent=2)
 
     @staticmethod

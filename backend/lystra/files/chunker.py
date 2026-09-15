@@ -34,6 +34,16 @@ class TextChunker:
                         text_to_chunk = f"Sheet: {s_name}\nHeaders: {s_headers}\n\n{s_content}"
                         chunks.extend(TextChunker._basic_chunk(text_to_chunk, chunk_size, overlap))
                     return chunks
+                    
+                # Handle PPTX structural chunking
+                elif data.get("type") == "pptx" and "sections" in data:
+                    for sec in data["sections"]:
+                        title = sec.get("title", "")
+                        slide_num = sec.get("slide_number", "")
+                        content = sec.get("content", "")
+                        text_to_chunk = f"Slide {slide_num}: {title}\n{content}"
+                        chunks.extend(TextChunker._basic_chunk(text_to_chunk, chunk_size, overlap))
+                    return chunks
         except Exception:
             pass # Fall back to basic string chunking
             
