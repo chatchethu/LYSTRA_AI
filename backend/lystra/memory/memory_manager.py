@@ -202,6 +202,8 @@ class MemoryManager:
         self.retriever = MemoryRetriever(llm_gateway, self.storage)
         self.formatter = MemoryFormatter()
         self.encryption = MemoryEncryption()
+        from backend.lystra.evaluation.telemetry_logger import TelemetryPipeline
+        self.telemetry = TelemetryPipeline(llm_gateway)
 
     async def process_user_message(self, user_id: str, message: str, context_history: List[str], intent: str = "conversation", understanding=None):
         """
@@ -209,6 +211,16 @@ class MemoryManager:
         """
         # Phases 28, 29, 30: User Feedback & Learning
         if understanding:
+            # Phase 33 & 34: Fire and forget telemetry logging for offline learning loop
+            import asyncio
+            
+            if getattr(understanding, "explicit_feedback", None):
+                for fb in understanding.explicit_feedback:
+                    asyncio.create_task(self.telemetry.classify_and_log_feedback(user_id, fb, "explicit"))
+            if getattr(understanding, "implicit_feedback", None):
+                for fb in understanding.implicit_feedback:
+                    asyncio.create_task(self.telemetry.classify_and_log_feedback(user_id, fb, "implicit"))
+
             existing_memories_fallback = None
             
             async def get_memories():
