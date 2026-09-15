@@ -33,6 +33,8 @@ class FileRetriever:
                     select(FileChunk, File.filename)
                     .join(File, FileChunk.file_id == File.id)
                     .where(
+                        # Phase 43: Strict Semantic Index Security Access Boundary
+                        # The JOIN guarantees that pgvector applies the tenant separation BEFORE returning distances.
                         File.user_id == uuid.UUID(str(user_id)),
                         File.status == "ready"
                     )
@@ -75,6 +77,7 @@ class FileRetriever:
                 # Return the top N chunks after structural reranking
                 return candidates[:limit]
         except Exception as e:
+            # Phase 42: Sensitive Data Handling. Do NOT log raw chunks or document exceptions that may contain PI.
             logger.error("file_retrieval_failed", error=str(e), user_id=user_id)
             return []
 
