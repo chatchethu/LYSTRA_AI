@@ -96,6 +96,10 @@ class MemoryExtractor:
             fact_hash = hashlib.sha256(fact.encode("utf-8")).hexdigest()[:8]
             safe_key = f"{mem_type.value if hasattr(mem_type, 'value') else mem_type}_{fact_hash}"
 
+        # Phase 8: Lifecycle Status
+        # Explicit memories are instantly active. Inferred ones must be validated over time.
+        initial_status = MemoryStatus.ACTIVE if source == MemorySource.EXPLICIT else MemoryStatus.CANDIDATE
+
         # Step 3: Create the Structured Object
         return MemoryObject(
             user_id=user_id,
@@ -105,5 +109,6 @@ class MemoryExtractor:
             key=safe_key,
             value=fact, 
             confidence=confidence,
-            source=source
+            source=source,
+            status=initial_status
         )

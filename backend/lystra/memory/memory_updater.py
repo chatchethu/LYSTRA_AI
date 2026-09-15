@@ -30,7 +30,12 @@ class MemoryUpdater:
         )
         
         if not should_update:
-            # Fix #2: Removed misleading comment about confidence bumps
+            # PHASE 6 & 8: Repetition bumps confidence and promotes lifecycle
+            if not existing_is_explicit:
+                existing_memory.confidence = min(1.0, existing_memory.confidence + 0.15)
+                current_status = getattr(existing_memory.status, "value", existing_memory.status)
+                if current_status == "candidate" and existing_memory.confidence >= 0.70:
+                    existing_memory.status = MemoryStatus.ACTIVE
             return existing_memory
             
         # Fix #3: Retain real history
