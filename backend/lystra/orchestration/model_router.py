@@ -80,7 +80,15 @@ class ModelRouter:
         
         # Determine base latency / logic constraints
         # Fix #7: Use PrimaryIntent Enum values instead of magic strings
-        if primary_intent == PrimaryIntent.CONVERSATION and context_length < 2000:
+        
+        # Phase 47 & 48: Model Routing by Task Modality
+        if "spreadsheet" in secondary_intent or "calculate" in secondary_intent or "csv" in secondary_intent:
+            requires_tools = True
+            latency = "heavy"
+        elif primary_intent == PrimaryIntent.COMPARISON or "compare" in secondary_intent or "summarize" in secondary_intent or "reason" in secondary_intent:
+            latency = "heavy"
+            
+        if primary_intent == PrimaryIntent.CONVERSATION and context_length < 2000 and latency != "heavy":
             latency = "fast"
         elif primary_intent in [PrimaryIntent.CREATION, PrimaryIntent.PROBLEM_SOLVING] and "code" in secondary_intent:
             latency = "heavy"
