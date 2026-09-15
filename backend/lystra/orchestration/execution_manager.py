@@ -407,8 +407,17 @@ CRITICAL: The CURRENT explicit request always has priority. If a user asks for "
 [FILE QUESTION PIPELINE] (PHASE 15)
 When answering questions about uploaded files:
 1. Answer the specific question directly using the retrieved evidence.
-2. Do NOT provide a massive summary of the file unless explicitly requested (e.g. "Summarize this document").
+2. Do NOT provide a massive summary of the file unless explicitly requested.
 3. Follow this strict pipeline: File + User Question -> Determine Task -> Retrieve Relevant Evidence -> Answer.
+
+[DOCUMENT GROUNDING & CITATIONS] (PHASE 21, 23, 24)
+1. CITE YOUR SOURCES: Every factual claim based on a document must end with an inline structural citation matching the chunk metadata (e.g., [Page 14], [Slide 9], [Section: Financial Results], [Sheet: Summary, Range: B12]).
+2. SUMMARIZATION DYNAMICS: If asked to summarize, dynamically adopt the correct level (e.g., one-sentence, detailed, section-by-section). Preserve important document structure inherently (e.g. Purpose -> Findings -> Conclusion) based on the document type, without forcing a rigid template.
+
+[SPREADSHEET ANALYSIS PIPELINE] (PHASE 25)
+1. When answering spreadsheet analytical questions using programmatic tools, explicitly explain your logic.
+2. Provide the result, explain the calculation naturally, and cite the source sheet/range.
+3. Do NOT simply dump raw data rows.
 
 [DATA ANALYSIS PIPELINE] (PHASE 9)
 When the user asks an analytical question about a spreadsheet (e.g., sums, averages, min/max, filtering, grouping):
@@ -524,15 +533,21 @@ CRITICAL MEMORY RULES:
 
         # Quality Evaluator
         try:
-            metrics = await self.quality_evaluator.evaluate(generated_response, ctx.understanding.goal)
+            # Phase 22: Pass file_context to rigorously check Document Grounding metrics
+            metrics = await self.quality_evaluator.evaluate(generated_response, ctx.understanding.goal, ctx.file_context)
             if self.quality_evaluator.requires_revision(metrics):
                 logger.info("revising_weak_response", quality_metrics=metrics)
+                
+                # Phase 22: Enforce zero-hallucination revision instruction
+                revision_instruction = f"Original request:\n{user_message}\n\nDraft response:\n{generated_response}\n\nRevise the draft to better address the original request."
+                if ctx.file_context and metrics.grounding < 0.9:
+                    revision_instruction += "\n\nCRITICAL GROUNDING ERROR DETECTED: The draft hallucinated values, mixed unrelated sections, or lacked sufficient evidence. DO NOT FABRICATE. If evidence is insufficient, explicitly state that you cannot answer based on the provided document."
+
                 generated_response = await asyncio.wait_for(
                     self.llm.chat(
                         messages=[
                             {"role": "system", "content": ctx.system_policy},
-                            # Fix #6: Include original context in revision prompt
-                            {"role": "user", "content": f"Original request:\n{user_message}\n\nDraft response:\n{generated_response}\n\nRevise the draft to better address the original request."},
+                            {"role": "user", "content": revision_instruction},
                         ],
                         model=ctx.route.selected_model,
                     ),

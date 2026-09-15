@@ -24,10 +24,19 @@ class QualityEvaluator:
     def __init__(self, llm_gateway):
         self.llm = llm_gateway
 
-    async def evaluate(self, generated_response: str, request_goal: str) -> QualityMetrics:
+    async def evaluate(self, generated_response: str, request_goal: str, file_context: str = "") -> QualityMetrics:
         """Evaluates the generated answer to produce quality signals."""
         prompt = f"Goal: {request_goal}\nResponse: {generated_response}"
         system = "Evaluate the quality of this response on a 0.0 to 1.0 scale. Output only valid JSON matching this schema: {'relevance': 0.0, 'completeness': 0.0, 'grounding': 0.0, 'instruction_following': 0.0, 'format_quality': 0.0, 'confidence': 0.0}"
+        
+        # Phase 22: Document Answer Grounding
+        if file_context:
+            system += (
+                "\n\nCRITICAL GROUNDING CHECK (Phase 22): Since this request involves a document, rigidly evaluate the 'grounding' metric. "
+                "Check: Does the answer come from the file? Did it invent a value? Did it mix unrelated sections? "
+                "Did it confuse sheets/pages? If any evidence is fabricated or insufficient, score 'grounding' below 0.5. "
+                "If it honestly states evidence is insufficient, score 'grounding' high (e.g. 1.0) because it avoided fabrication."
+            )
         
         response_text = None  # Fix #2: Initialize safely before try block
         try:
