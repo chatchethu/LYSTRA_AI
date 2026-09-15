@@ -21,6 +21,7 @@ class MemoryUpdateInput(BaseModel):
     content: Optional[str] = None
     memory_type: Optional[str] = None
     importance: Optional[float] = None
+    status: Optional[str] = None
 
 class SearchQuery(BaseModel):
     query: str
@@ -78,13 +79,28 @@ async def update_memory(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session)
 ):
-    """Phase 25: Update memory / Disable memory (set status)"""
+    """Phase 25: Update memory"""
     mem = await crud_memory.get(db, id=id)
     if not mem or mem.user_id != user.id:
         raise HTTPException(status_code=404, detail="Memory not found")
         
     update_data = memory_in.model_dump(exclude_unset=True)
     mem = await crud_memory.update(db, db_obj=mem, obj_in=update_data)
+    await db.commit()
+    return mem
+
+@router.post("/{id}/disable", response_model=MemoryResponse)
+async def disable_memory(
+    id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """Phase 25: Disable memory explicitly without deleting"""
+    mem = await crud_memory.get(db, id=id)
+    if not mem or mem.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Memory not found")
+        
+    mem = await crud_memory.update(db, db_obj=mem, obj_in={"status": "disabled"})
     await db.commit()
     return mem
 
