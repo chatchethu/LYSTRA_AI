@@ -30,6 +30,9 @@ class ConversationState(BaseModel):
     # Fix #3 (entity type): entities are now a list of strings matching SemanticUnderstanding.entities.
     # The old Dict[str, str] was a type mismatch (SemanticUnderstanding.entities is List[str]).
     important_entities: List[str] = Field(default_factory=list)
+    # Phase 17: Multi-Turn File Conversation Context
+    active_files: List[str] = Field(default_factory=list)
+    previous_files: List[str] = Field(default_factory=list)
     user_requested_format: Optional[str] = None
     current_task_state: Optional[TaskState] = None
 
