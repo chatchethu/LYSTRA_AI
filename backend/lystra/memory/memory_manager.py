@@ -292,7 +292,7 @@ class MemoryManager:
                 logger.error("memory_consolidation_failed", error=str(e))
 
     async def get_contextual_prompt_injection(
-        self, user_id: str, current_request: str, verified_name: str = ""
+        self, user_id: str, current_request: str, understanding=None, verified_name: str = ""
     ) -> str:
         """
         Phase 10-12: Retrieves relevant memories and formats them for natural personalization.
@@ -301,7 +301,7 @@ class MemoryManager:
         are stripped before injection — the verified name is already in the [VERIFIED IDENTITY]
         system block and must not be contradicted by a stale or incorrect memory-stored name.
         """
-        relevant_memories = await self.retriever.retrieve_useful_context(user_id, current_request)
+        relevant_memories = await self.retriever.retrieve_useful_context(user_id, current_request, understanding)
 
         if verified_name:
             # Remove any name-type memories so they can't compete with the verified DB name.

@@ -339,7 +339,7 @@ class ExecutionManager:
                     
             self._spawn_background_task(_safe_memory_process(), task_name=f"memory_write:{user_id_str}")
             memory_context = await self.memory_manager.get_contextual_prompt_injection(
-                user_id_str, user_message, verified_name=account_info
+                user_id_str, user_message, understanding=understanding, verified_name=account_info
             )
             if memory_context:
                 memory_context = self._sanitize_untrusted(memory_context)

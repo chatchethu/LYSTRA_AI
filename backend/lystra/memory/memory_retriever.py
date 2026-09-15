@@ -15,10 +15,24 @@ class MemoryRetriever:
         self.ranker = MemoryRanker(llm_gateway)
         self.storage = storage_backend
 
-    async def _decide_memory_required(self, request: str) -> bool:
-        """Phase 14: Memory Usage Decision"""
-        # Fast heuristic: if it's a greeting or very simple, maybe no memory.
-        # Fix #5: Corrected the inverted logic. Greetings should skip memory read.
+    async def _decide_memory_required(self, request: str, understanding=None) -> bool:
+        """Phase 14: Memory Usage Decision
+        Lystra must make a decision: memory_required = true/false
+        If false: do not inject unnecessary personal information.
+        If true: retrieve only the minimum necessary memory. This prevents over-personalization.
+        """
+        if understanding:
+            # If semantic analyzer says this is just a generic greeting or very low context dependency
+            # we explicitly skip memory to prevent over-personalization
+            primary_intent = getattr(understanding.intent, "primary", "")
+            if hasattr(primary_intent, "value"):
+                primary_intent = primary_intent.value
+            if primary_intent == "conversation" and understanding.context_dependency < 0.2:
+                # Still check if they are asking something personal implicitly
+                request_lower = request.lower()
+                if "my" not in request_lower and "i " not in request_lower and "me " not in request_lower:
+                    return False
+
         request_lower = request.lower()
         if request_lower in ["hi", "hello", "hey"]:
             return False
@@ -29,13 +43,13 @@ class MemoryRetriever:
             
         return True
 
-    async def retrieve_useful_context(self, user_id: str, current_request: str) -> List[MemoryObject]:
+    async def retrieve_useful_context(self, user_id: str, current_request: str, understanding=None) -> List[MemoryObject]:
         """
         Retrieves, ranks, and filters memories so we only inject USEFUL context,
         not irrelevant facts like favorite food when asking a coding question.
         """
         # Phase 14: Memory Usage Decision
-        memory_required = await self._decide_memory_required(current_request)
+        memory_required = await self._decide_memory_required(current_request, understanding)
         if not memory_required:
             return []
 
