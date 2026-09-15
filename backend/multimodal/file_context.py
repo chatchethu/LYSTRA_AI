@@ -17,8 +17,11 @@ class FileType(str, Enum):
 
 
 class FileStatus(str, Enum):
-    PENDING = "pending"
+    # Phase 37: Processing State granularity
+    UPLOADED = "uploaded"
+    VALIDATING = "validating"
     PROCESSING = "processing"
+    INDEXING = "indexing"
     READY = "ready"
     FAILED = "failed"
 

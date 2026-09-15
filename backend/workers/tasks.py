@@ -162,6 +162,9 @@ def process_file_upload(self, file_id: str):
 
 async def _process_file_upload_async(file_id: str):
     import uuid
+    import os
+    import tempfile
+    import shutil
     from backend.storage.s3_client import S3Client
     from backend.lystra.files.security import FileSecurityValidator
     from backend.lystra.files.parsers import DocumentParser
@@ -182,9 +185,17 @@ async def _process_file_upload_async(file_id: str):
     s3 = S3Client()
     llm = LLMGateway(OllamaProvider())
     
+    # Phase 38 & 39: Secure Temporary Workspace
+    workspace_dir = tempfile.mkdtemp(prefix=f"lystra_file_{file_id}_")
+    temp_file_path = os.path.join(workspace_dir, "downloaded_file.tmp")
+    
+    async def set_state(db, state: str, error: str = None):
+        err_msg = str(error) if error else None
+        await db.execute(update(File).where(File.id == uuid.UUID(file_id)).values(status=state, error=err_msg))
+        await db.commit()
+
     async with LocalSession() as db:
         try:
-            # Fetch file record
             stmt = select(File).where(File.id == uuid.UUID(file_id))
             result = await db.execute(stmt)
             db_file = result.scalar_one_or_none()
@@ -196,23 +207,27 @@ async def _process_file_upload_async(file_id: str):
             s3_key = db_file.storage_key.replace(f"s3://{settings.AWS_S3_BUCKET}/", "")
             original_filename = db_file.filename
 
-            # 1. Download from Quarantine
+            # 1. Download to Temp Storage (Phase 38: Large File Streaming avoidance of RAM limits)
+            # Assuming s3.download_file_to_path exists, or we just stream it.
+            # For now we use the existing download_file but write it to disk.
             file_bytes = await s3.download_file(s3_key)
+            with open(temp_file_path, "wb") as f:
+                f.write(file_bytes)
 
-            # 2. Security Validation
+            # Phase 37: Processing States (VALIDATING)
+            await set_state(db, "validating")
             is_valid, category, error_msg = FileSecurityValidator.validate_file_bytes(file_bytes, original_filename)
             if not is_valid:
-                await db.execute(update(File).where(File.id == uuid.UUID(file_id)).values(status="error", error=error_msg))
-                await db.commit()
+                await set_state(db, "failed", error_msg)
                 return
 
-            # 3. Parse Content
+            # Phase 37: Processing States (PROCESSING)
+            await set_state(db, "processing")
             text = DocumentParser.parse(file_bytes, category, original_filename)
-
-            # 4. Chunking
             chunks = TextChunker.chunk_text(text)
             
-            # 5. Embedding & Saving
+            # Phase 37: Processing States (INDEXING)
+            await set_state(db, "indexing")
             for i, chunk_text in enumerate(chunks):
                 emb = await llm.embed(chunk_text)
                 db_chunk = FileChunk(
@@ -222,8 +237,9 @@ async def _process_file_upload_async(file_id: str):
                     embedding=emb
                 )
                 db.add(db_chunk)
+            await db.commit() # Flush chunks
 
-            # 6. S3 Promotion & Status Update
+            # 6. S3 Promotion & READY
             new_s3_key = s3_key.replace("uploads/", "processed/")
             await s3.move_file(s3_key, new_s3_key)
             new_storage_url = f"s3://{settings.AWS_S3_BUCKET}/{new_s3_key}"
@@ -237,7 +253,13 @@ async def _process_file_upload_async(file_id: str):
 
         except Exception as e:
             logger.exception("process_document_failed", file_id=file_id, error=str(e))
-            await db.execute(update(File).where(File.id == uuid.UUID(file_id)).values(status="error", error=str(e)))
-            await db.commit()
+            # Phase 37: Provide useful failure without stack trace
+            safe_error = "Processing failed during data extraction." if "struct" in str(e) else str(e)
+            await set_state(db, "failed", safe_error)
         finally:
+            # Phase 39: Secure Cleanup
+            try:
+                shutil.rmtree(workspace_dir, ignore_errors=True)
+            except Exception as cleanup_err:
+                logger.error("workspace_cleanup_failed", error=str(cleanup_err))
             await local_engine.dispose()
