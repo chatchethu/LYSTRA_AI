@@ -203,10 +203,66 @@ class MemoryManager:
         self.formatter = MemoryFormatter()
         self.encryption = MemoryEncryption()
 
-    async def process_user_message(self, user_id: str, message: str, context_history: List[str], intent: str = "conversation"):
+    async def process_user_message(self, user_id: str, message: str, context_history: List[str], intent: str = "conversation", understanding=None):
         """
-        Phase 1-9 & 20-23: Analyzes incoming messages to extract, deduplicate, and update memories.
+        Phase 1-9 & 20-30: Analyzes incoming messages, explicit feedback, and implicit signals to build memory.
         """
+        # Phases 28, 29, 30: User Feedback & Learning
+        if understanding:
+            existing_memories_fallback = None
+            
+            async def get_memories():
+                nonlocal existing_memories_fallback
+                if existing_memories_fallback is None:
+                    try:
+                        emb = await self.extractor.llm.embed(message)
+                        existing_memories_fallback = await self.storage.search_by_embedding(user_id, emb, limit=20)
+                    except Exception:
+                        existing_memories_fallback = await self.storage.fetch_active_memories(user_id)
+                return existing_memories_fallback
+
+            if getattr(understanding, "explicit_feedback", None):
+                for feedback in understanding.explicit_feedback:
+                    candidate = MemoryObject(
+                        user_id=user_id, type=MemoryType.PREFERENCE, key="explicit_feedback",
+                        value=feedback, status=MemoryStatus.ACTIVE, confidence=0.9, importance=0.8,
+                        source=MemorySource.EXPLICIT
+                    )
+                    try:
+                        candidate.embedding = await self.extractor.llm.embed(str(candidate.value))
+                    except Exception:
+                        pass
+                    
+                    mems = await get_memories()
+                    conflict = await self.updater.find_semantic_conflict(candidate, mems, self.extractor.llm)
+                    if conflict:
+                        resolved = self.updater.resolve_conflict(conflict, candidate)
+                        if not resolved.id: resolved.id = conflict.id
+                        await self.storage.update_memory(resolved)
+                    else:
+                        await self.storage.add_memory(candidate)
+                        
+            if getattr(understanding, "implicit_feedback", None):
+                for feedback in understanding.implicit_feedback:
+                    candidate = MemoryObject(
+                        user_id=user_id, type=MemoryType.PREFERENCE, key="implicit_feedback",
+                        value=feedback, status=MemoryStatus.CANDIDATE, confidence=0.4, importance=0.5,
+                        source=MemorySource.INFERRED
+                    )
+                    try:
+                        candidate.embedding = await self.extractor.llm.embed(str(candidate.value))
+                    except Exception:
+                        pass
+                        
+                    mems = await get_memories()
+                    conflict = await self.updater.find_semantic_conflict(candidate, mems, self.extractor.llm)
+                    if conflict:
+                        resolved = self.updater.resolve_conflict(conflict, candidate)
+                        if not resolved.id: resolved.id = conflict.id
+                        await self.storage.update_memory(resolved)
+                    else:
+                        await self.storage.add_memory(candidate)
+
         # Phase 20: Memory Extraction Timing
         if intent in ["greeting", "farewell", "acknowledgment"]:
             return

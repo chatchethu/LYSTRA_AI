@@ -111,16 +111,30 @@ async def upload_file(
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
+    # --- Phase 27: File Version Awareness ---
+    filename = file.filename or "upload"
+    stmt = select(DBFile).where(DBFile.user_id == current_user.id, DBFile.filename == filename).order_by(DBFile.version.desc()).limit(1)
+    result = await db.execute(stmt)
+    parent_file = result.scalar_one_or_none()
+    
+    version = 1
+    parent_id = None
+    if parent_file:
+        version = parent_file.version + 1
+        parent_id = parent_file.id
+        
     # --- Persist DB ---
     new_file = DBFile(
         id=file_id,
         user_id=current_user.id,
-        filename=file.filename or "upload",
+        filename=filename,
         mime_type=file.content_type or "",
         storage_key=storage_url,
         size=size,
         file_hash=sha256_hash,
-        status=FileStatus.PROCESSING.value
+        status=FileStatus.PROCESSING.value,
+        version=version,
+        parent_file_id=parent_id
     )
     db.add(new_file)
     await db.commit()

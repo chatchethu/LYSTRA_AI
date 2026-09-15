@@ -335,6 +335,7 @@ class ExecutionManager:
                         user_message,
                         [self._history_message(m)["content"] for m in chat_history[-5:]],
                         intent=intent_val,
+                        understanding=understanding,
                     )
                     
             self._spawn_background_task(_safe_memory_process(), task_name=f"memory_write:{user_id_str}")
@@ -409,6 +410,12 @@ When answering questions about uploaded files:
 1. Answer the specific question directly using the retrieved evidence.
 2. Do NOT provide a massive summary of the file unless explicitly requested.
 3. Follow this strict pipeline: File + User Question -> Determine Task -> Retrieve Relevant Evidence -> Answer.
+
+[CROSS-FILE REASONING PIPELINE] (PHASE 26, 27)
+1. If the user asks to compare two or more files (or asks "What changed?" about a new version):
+2. Normalize and align the concepts/schemas between the files.
+3. Compare the data carefully, detecting differences across terminology, units, dates, and structures.
+4. Highlight explicit version differences. Do not treat a V2 document as a completely unrelated file.
 
 [DOCUMENT GROUNDING & CITATIONS] (PHASE 21, 23, 24)
 1. CITE YOUR SOURCES: Every factual claim based on a document must end with an inline structural citation matching the chunk metadata (e.g., [Page 14], [Slide 9], [Section: Financial Results], [Sheet: Summary, Range: B12]).

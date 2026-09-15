@@ -56,6 +56,10 @@ class SemanticUnderstanding(BaseModel):
         description="High sensitivity topics (security, medical, loss) strictly suppress emojis and shift tone."
     )
 
+    # Phases 28, 29, 30: User Feedback & Learning
+    explicit_feedback: List[str] = Field(default_factory=list, description="Direct, explicit rules the user gives (e.g. 'Keep answers short').")
+    implicit_feedback: List[str] = Field(default_factory=list, description="Weak signals like repeated corrections, asking for simpler explanations.")
+
     is_fallback: bool = Field(default=False, description="True if this understanding was generated via fallback due to an error.")
     failure_reason: Optional[str] = Field(None, description="Reason for fallback if is_fallback is True.")
 
@@ -81,6 +85,8 @@ class LLMSemanticOutput(BaseModel):
     user_emotion: Literal["positive", "neutral", "negative", "frustrated", "confused", "celebratory", "sad", "humorous", "sarcastic"] = "neutral"
     user_tone: Literal["casual", "formal", "technical", "expressive"] = "casual"
     subject_sensitivity: Literal["low", "medium", "high"] = "low"
+    explicit_feedback: List[str] = Field(default_factory=list)
+    implicit_feedback: List[str] = Field(default_factory=list)
 
     @field_validator("ambiguity", "confidence", "context_dependency", mode="before")
     def clamp_floats(cls, v):
