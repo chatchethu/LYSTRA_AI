@@ -77,7 +77,25 @@ class DocumentParser:
                                 current_section["content"] += text + " "
                     current_section["content"] += "\n"
                 elif b["type"] == 1: # Image
-                    current_section["content"] += "\n[IMAGE]\n"
+                    # Phase 13 & 14: Extract image from PDF to enable vision reasoning pipeline
+                    try:
+                        import os
+                        import hashlib
+                        img_bytes = b.get("image")
+                        if img_bytes:
+                            # Save the image to a persistent cache directory so RAG can pull it up later
+                            img_hash = hashlib.md5(img_bytes).hexdigest()
+                            img_path = os.path.join(os.getcwd(), "media_cache", f"{img_hash}.png")
+                            os.makedirs(os.path.dirname(img_path), exist_ok=True)
+                            with open(img_path, "wb") as img_file:
+                                img_file.write(img_bytes)
+                            
+                            # Embed the exact URI pointer in the chunk text so semantic search retrieves it
+                            current_section["content"] += f"\n[IMAGE_URI: {img_path}]\n"
+                        else:
+                            current_section["content"] += "\n[IMAGE]\n"
+                    except Exception:
+                        current_section["content"] += "\n[IMAGE]\n"
         
         if current_section["content"].strip():
             current_section["page_end"] = len(doc)

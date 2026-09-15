@@ -26,7 +26,7 @@ class HierarchicalIntent(BaseModel):
         except ValueError:
             return PrimaryIntent.CONVERSATION
 
-    secondary: str = Field(description="The mid-level category (e.g. 'technical', 'travel', 'code')")
+    secondary: str = Field(description="The mid-level category or task intent (e.g. 'summarize', 'extract', 'compare', 'calculate', 'classify', 'locate', 'rewrite', 'translate', 'analyze', 'critique'). Must be inferred semantically, not strictly matched by keywords.")
     tertiary: Optional[str] = Field(None, description="The specific, low-level intent")
 
 
