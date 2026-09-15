@@ -16,6 +16,7 @@ class MemoryType(str, Enum):
     TEMPORARY = "temporary_information"
     SENSITIVE = "sensitive_information"
     IRRELEVANT = "irrelevant_information"
+    DO_NOT_STORE = "DO_NOT_STORE"
 
 class MemorySource(str, Enum):
     EXPLICIT = "user_explicit"

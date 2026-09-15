@@ -61,7 +61,7 @@ class MemoryExtractor:
             mem_type = MemoryType.IRRELEVANT
 
         # Do not store irrelevant or sensitive information
-        if mem_type in [MemoryType.IRRELEVANT, MemoryType.SENSITIVE]:
+        if mem_type in [MemoryType.IRRELEVANT, MemoryType.SENSITIVE, getattr(MemoryType, "DO_NOT_STORE", "DO_NOT_STORE")]:
             return None
             
         if self._contains_pii(classification.extracted_fact):

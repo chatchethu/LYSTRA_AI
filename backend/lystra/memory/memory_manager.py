@@ -15,6 +15,7 @@ from .memory_retriever import MemoryRetriever
 from .memory_formatter import MemoryFormatter
 
 from backend.config import get_settings
+from backend.lystra.memory.encryption import MemoryEncryption
 from backend.crud.memory import memory as crud_memory
 from backend.db.models.memory import Memory
 
@@ -76,7 +77,7 @@ class DBMemoryStorage:
                     user_id=str(m.user_id),
                     type=mem_type,
                     key=m.canonical_key or m.content[:50],
-                    value=m.content,
+                    value=self.encryption.decrypt(m.content),
                     confidence=m.confidence,
                     importance=m.importance,
                     source="user_explicit",
@@ -135,7 +136,7 @@ class DBMemoryStorage:
             return
             
         async with self._session() as db:
-            content_str = str(memory.value)[:10000] # Length cap
+            content_str = self.encryption.encrypt(str(memory.value)[:10000]) # Length cap and encryption
             update_data = {
                 "content": content_str,
                 "importance": memory.importance,
@@ -200,6 +201,7 @@ class MemoryManager:
         self.storage = DBMemoryStorage()
         self.retriever = MemoryRetriever(llm_gateway, self.storage)
         self.formatter = MemoryFormatter()
+        self.encryption = MemoryEncryption()
 
     async def process_user_message(self, user_id: str, message: str, context_history: List[str], intent: str = "conversation"):
         """
