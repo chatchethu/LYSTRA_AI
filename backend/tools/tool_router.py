@@ -1,5 +1,6 @@
 import json
 import asyncio
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional, List
 from pydantic import BaseModel, Field, model_validator
@@ -57,6 +58,7 @@ class ToolRoutingDecision(BaseModel):
 
 # Fix #3: Added explicit rule for User's own identity mapped to PERSONAL.
 _ROUTER_PROMPT = """You are the Tool Routing Engine for LYSTRA.
+Current Date and Time: {current_time}
 Your job is to decide whether a web search is required to answer the user's message.
 
 ROUTING PRIORITY
@@ -100,8 +102,8 @@ Output ONLY a JSON object (no explanation, no markdown):
 IMPORTANT rules for search_queries:
 - If web_policy is NO_WEB → set search_queries to null (not a string, the JSON null value)
 - If web_policy requires web search → write 1 to 3 highly optimized search queries to get the best information.
-- Break down complex conversational messages into targeted factual search queries.
-- Example: User says "i need to learn hacking so from where i need to start" -> search_queries: ["best resources to learn ethical hacking for beginners", "ethical hacking roadmap for beginners 2024", "top websites to practice hacking legally"]
+- Break down complex conversational messages into targeted factual search queries. Use the current year ({current_year}) for recency if applicable.
+- Example: User says "i need to learn hacking so from where i need to start" -> search_queries: ["best resources to learn ethical hacking for beginners", "ethical hacking roadmap for beginners {current_year}", "top websites to practice hacking legally"]
 - NEVER copy this instruction text into search_queries
 """
 
@@ -306,10 +308,13 @@ class ToolRouter:
         # Fix #2: Sanitize understanding_json as well! If any string field has injection it could break out.
         understanding_json = self._sanitize_for_prompt(understanding_json)
 
+        now = datetime.now(timezone.utc)
         prompt = _ROUTER_PROMPT.format(
             history=safe_history,
             message=safe_message,
-            understanding=understanding_json
+            understanding=understanding_json,
+            current_time=now.strftime("%Y-%m-%d %H:%M:%S UTC"),
+            current_year=str(now.year)
         )
 
         # Fix #8: Added a single retry attempt.
