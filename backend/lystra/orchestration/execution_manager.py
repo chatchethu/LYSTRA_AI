@@ -17,6 +17,9 @@ from backend.tools.web.web_search import WebSearchTool
 from backend.tools.web.web_research_agent import WebResearchAgent
 from backend.config import get_settings
 from backend.lystra.memory.memory_manager import MemoryManager
+# Fix #10 & #11: Use the application-level shared DB engine and session factory.
+# This eliminates the _loop_engines per-EM engine proliferation and leak.
+from backend.db.session import AsyncSessionLocal
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -78,9 +81,6 @@ class ExecutionManager:
 
         self._background_tasks: set = set()
 
-        # Per-user memory-write locks (process-local; serializes concurrent turns)
-        self._memory_locks: collections.OrderedDict = collections.OrderedDict()
-
         try:
             settings = get_settings()
             self.model_router = ModelRouter(
@@ -90,12 +90,49 @@ class ExecutionManager:
             self.style_controller = StyleController()
             self.quality_evaluator = QualityEvaluator(llm_gateway)
             self.emoji_validator = EmojiValidator()
-            # Redis for cross-worker state persistence
+            # Redis for cross-worker state persistence and distributed locking
             self._redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
             self._state_cache_max = _STATE_CACHE_MAX
         except Exception as e:
             logger.error("initialization_failed", error=str(e))
             raise
+
+    # -----------------------------------------------------------------------
+    # Fix #8 & #9: Redis distributed lock for memory writes
+    # Replaces the evictable asyncio.Lock() dict which had two bugs:
+    #   1. Eviction deleted a lock that an in-flight request still held,
+    #      so two concurrent requests could acquire different lock objects.
+    #   2. asyncio.Lock() is process-local — workers A and B could write
+    #      the same user's memory simultaneously with no coordination.
+    # Redis locks are process-safe, worker-safe, and never evict.
+    # -----------------------------------------------------------------------
+
+    def _memory_lock_key(self, user_id: str) -> str:
+        return f"mem_write_lock:{user_id}"
+
+    async def _acquire_memory_lock(self, user_id: str, timeout: float = 30.0) -> bool:
+        """
+        Acquire a Redis distributed lock for memory writes for this user.
+        Returns True if acquired, False if timed out.
+        NX=True means only the first caller gets it; PX sets auto-expiry in ms
+        so a crashed worker never leaves the lock held permanently.
+        """
+        lock_key = self._memory_lock_key(user_id)
+        lock_ttl_ms = int(timeout * 1000)
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            acquired = await self._redis.set(lock_key, "1", nx=True, px=lock_ttl_ms)
+            if acquired:
+                return True
+            await asyncio.sleep(0.05)
+        logger.warning("memory_lock_acquisition_timed_out", user_id=user_id)
+        return False
+
+    async def _release_memory_lock(self, user_id: str) -> None:
+        try:
+            await self._redis.delete(self._memory_lock_key(user_id))
+        except Exception as e:
+            logger.warning("memory_lock_release_failed", user_id=user_id, error=str(e))
 
     # -----------------------------------------------------------------------
     # Shutdown
@@ -180,43 +217,23 @@ class ExecutionManager:
         except Exception as e:
             logger.warning("state_redis_save_failed", user_id=user_id, error=str(e))
 
-    def _get_memory_lock(self, user_id: str) -> asyncio.Lock:
-        if user_id not in self._memory_locks:
-            if len(self._memory_locks) > 1000:
-                oldest_key = next(iter(self._memory_locks))
-                del self._memory_locks[oldest_key]
-            self._memory_locks[user_id] = asyncio.Lock()
-        else:
-            self._memory_locks.move_to_end(user_id)
-        return self._memory_locks[user_id]
-
     # -----------------------------------------------------------------------
-    # DB helpers
+    # DB helpers — Fix #10 & #11: use shared AsyncSessionLocal
     # -----------------------------------------------------------------------
 
-    _loop_engines: dict = {}
 
     async def _get_user_account_info(self, user_id: str | uuid.UUID) -> str:
         """
         Fetch the user's display name for personalization.
-        Uses an engine securely bound to the CURRENT asyncio event loop to
-        avoid Celery 'Event loop is closed' errors.
+        Uses the application-level shared AsyncSessionLocal (backend.db.session)
+        which is backed by a properly configured connection pool. No per-EM
+        engine creation, no event-loop keying, no shutdown leak.
         """
         try:
-            from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
             from sqlalchemy import select
             from backend.db.models.user import User
 
-            loop = asyncio.get_running_loop()
-            if loop not in self._loop_engines:
-                settings = get_settings()
-                engine = create_async_engine(settings.DATABASE_URL, pool_size=5, pool_pre_ping=True)
-                self._loop_engines[loop] = engine
-
-            engine = self._loop_engines[loop]
-            LocalSession = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-            async with LocalSession() as db:
+            async with AsyncSessionLocal() as db:
                 result = await db.execute(select(User).where(User.id == uuid.UUID(str(user_id))))
                 user = result.scalar_one_or_none()
                 if user:
@@ -507,8 +524,12 @@ class ExecutionManager:
             )
 
             async def _safe_memory_process():
-                lock = self._get_memory_lock(user_id_str)
-                async with lock:
+                # Fix #8 & #9: Use Redis distributed lock so concurrent requests
+                # from ANY worker for this user are serialized — not just within
+                # this process. Lock auto-expires in 30s so a crashed worker
+                # never leaves it held permanently.
+                acquired = await self._acquire_memory_lock(user_id_str, timeout=30.0)
+                try:
                     await self.memory_manager.process_user_message(
                         user_id_str,
                         user_message,
@@ -516,6 +537,9 @@ class ExecutionManager:
                         intent=intent_val,
                         understanding=understanding,
                     )
+                finally:
+                    if acquired:
+                        await self._release_memory_lock(user_id_str)
 
             self._spawn_background_task(_safe_memory_process(), task_name=f"memory_write:{user_id_str}")
             memory_context = await asyncio.wait_for(

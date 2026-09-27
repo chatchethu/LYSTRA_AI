@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     DATABASE_POOL_SIZE: int = 10
     DATABASE_MAX_OVERFLOW: int = 20
+    DATABASE_POOL_TIMEOUT: int = 10      # seconds to wait for a free connection before error
+    DATABASE_POOL_RECYCLE: int = 1800   # seconds before a connection is recycled (30 min)
 
     # Redis
     REDIS_URL: str

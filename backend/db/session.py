@@ -12,10 +12,11 @@ settings = get_settings()
 # Pre-ping prevents stale connection errors.
 engine = create_async_engine(
     settings.DATABASE_URL,
-    pool_size=10,
-    max_overflow=20,
+    pool_size=settings.DATABASE_POOL_SIZE,
+    max_overflow=settings.DATABASE_MAX_OVERFLOW,
+    pool_timeout=settings.DATABASE_POOL_TIMEOUT,    # seconds to wait for a free connection
     pool_pre_ping=True,
-    pool_recycle=1800,
+    pool_recycle=settings.DATABASE_POOL_RECYCLE,    # recycle connections before they go stale
     echo=settings.DEBUG,
 )
 
