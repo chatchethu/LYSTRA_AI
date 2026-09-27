@@ -213,8 +213,8 @@ class ExecutionManager:
         try:
             raw = await self._redis.get(self._state_redis_key(user_id))
             if raw:
-                from backend.lystra.context.conversation_state import ConversationState
-                mgr._state = ConversationState.model_validate_json(raw)
+                # Fix #36: Enforce encapsulation using public method.
+                await mgr.set_state_from_json(raw)
         except Exception as e:
             logger.warning("state_redis_load_failed", user_id=user_id, error=str(e))
 
@@ -228,7 +228,8 @@ class ExecutionManager:
     async def _save_state(self, user_id: str, mgr: StateManager) -> None:
         """Persist ConversationState to Redis. Best-effort — failures are logged, not raised."""
         try:
-            raw = mgr._state.model_dump_json()
+            # Fix #36: Enforce encapsulation using public method.
+            raw = mgr.get_state_json()
             await self._redis.setex(self._state_redis_key(user_id), _STATE_TTL_SECONDS, raw)
             # Refresh read-cache
             self._state_cache[user_id] = mgr
@@ -249,16 +250,25 @@ class ExecutionManager:
         Uses the shared AsyncSessionLocal — no per-EM engine, no leak.
         """
         try:
+            # Fix #37: Explicitly validate the user_id formatting. 
+            # If invalid, raise rather than swallowing, which would mask authentication failures.
+            user_uuid = uuid.UUID(str(user_id))
+        except ValueError as e:
+            logger.error("invalid_user_id_format", user_id=str(user_id))
+            raise ValueError("Invalid user_id format. Must be a valid UUID.") from e
+
+        try:
             from sqlalchemy import select
             from backend.db.models.user import User
 
             async with AsyncSessionLocal() as db:
-                result = await db.execute(select(User).where(User.id == uuid.UUID(str(user_id))))
+                result = await db.execute(select(User).where(User.id == user_uuid))
                 user = result.scalar_one_or_none()
                 if user:
-                    name = user.display_name or user.username or ""
-                    tz = user.timezone or ""
-                    return name.strip(), tz.strip()
+                    # Fix #38: Safely handle None values before stripping
+                    name = (user.display_name or user.username or "").strip()
+                    tz = (user.timezone or "").strip()
+                    return name, tz
         except Exception as e:
             logger.error("get_user_account_info_failed", user_id=str(user_id), error=str(e))
         return "", ""
@@ -527,19 +537,9 @@ class ExecutionManager:
                 ],
             )
 
-            # Update state from this turn's understanding
-            try:
-                await state_mgr.update_from_understanding(understanding)
-                state = state_mgr.get_state()
-                # Persist updated state to Redis
-                self._spawn_background_task(
-                    self._save_state(user_id_str, state_mgr),
-                    task_name=f"state_save:{user_id_str}",
-                )
-            except Exception as e:
-                logger.error("state_update_failed", error=str(e))
-
             # 4. Ambiguity Detection
+            # Fix #34: Check ambiguity BEFORE mutating conversation state.
+            # If the user is ambiguous, their message shouldn't irreversibly shift topics.
             from backend.lystra.context.conversation_state import ConversationState as _CS
             ambiguity_result = self.ambiguity_detector.check_ambiguity(
                 understanding, state if state is not None else _CS()
@@ -552,6 +552,18 @@ class ExecutionManager:
                     system_policy="",
                     ambiguity_message=ambiguity_result["clarification_needed"],
                 )
+
+            # Update state from this turn's understanding (now that intent is clear)
+            try:
+                await state_mgr.update_from_understanding(understanding)
+                state = state_mgr.get_state()
+                # Persist updated state to Redis
+                self._spawn_background_task(
+                    self._save_state(user_id_str, state_mgr),
+                    task_name=f"state_save:{user_id_str}",
+                )
+            except Exception as e:
+                logger.error("state_update_failed", error=str(e))
 
             # 5. Model & Tool Routing
             context_length = sum(len(m.get("content", "")) for m in chat_history)
@@ -832,10 +844,11 @@ CRITICAL: Do NOT print these internal concepts (e.g. "active_goal", "current_top
                         file_context_str += f"--- [Source File: {chunk['filename']}] ---\n{chunk['content']}\n\n"
 
                     # Phase 44: Contextual awareness
-                    state_mgr._state.active_files = list(set([c["filename"] for c in file_chunks]))
-                    state_mgr._state.previous_file_question = user_message
+                    # Fix #35 & #36: Use public setter methods to avoid unprotected concurrent state mutation
+                    await state_mgr.set_active_files(list(set([c["filename"] for c in file_chunks])))
+                    await state_mgr.set_previous_file_question(user_message)
                     if getattr(understanding, "intent", None) and getattr(understanding.intent, "secondary", None):
-                        state_mgr._state.current_analysis_task = understanding.intent.secondary
+                        await state_mgr.set_current_analysis_task(understanding.intent.secondary)
 
             except asyncio.TimeoutError:
                 logger.warning("file_retrieval_timed_out", user_id=user_id_str)

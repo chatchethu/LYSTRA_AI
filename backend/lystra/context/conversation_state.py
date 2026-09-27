@@ -185,3 +185,25 @@ class StateManager:
     def get_state_dict(self) -> Dict[str, Any]:
         """Returns the state as a plain dict for prompt injection."""
         return self.get_state().model_dump()
+
+    # Fix #35 & #36: Expose public async methods to safely mutate state with lock
+    async def set_active_files(self, active_files: List[str]) -> None:
+        async with self._lock:
+            self._state.active_files = active_files
+
+    async def set_previous_file_question(self, question: str) -> None:
+        async with self._lock:
+            self._state.previous_file_question = question
+            
+    async def set_current_analysis_task(self, task: Optional[str]) -> None:
+        async with self._lock:
+            self._state.current_analysis_task = task
+
+    def get_state_json(self) -> str:
+        """Returns the serialized state. Caller does not need lock since it's a deep copy."""
+        return self._state.model_dump_json()
+
+    async def set_state_from_json(self, raw: str) -> None:
+        """Loads state from JSON safely."""
+        async with self._lock:
+            self._state = ConversationState.model_validate_json(raw)
