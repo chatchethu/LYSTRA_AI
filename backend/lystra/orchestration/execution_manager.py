@@ -880,12 +880,15 @@ CRITICAL: Do NOT print these internal concepts as literal markdown headings in y
     async def _post_process_response(self, generated_response: str, user_message: str, ctx: TurnContext) -> str:
         """Fix #26: Unified quality evaluation and validation pipeline."""
         # Fix #39: Only evaluate when needed (high risk/complexity)
-        intent_val = getattr(ctx.understanding.intent, "primary", "") if getattr(ctx.understanding, "intent", None) else ""
+        intent_primary = getattr(ctx.understanding.intent, "primary", "") if getattr(ctx.understanding, "intent", None) else ""
+        intent_secondary = getattr(ctx.understanding.intent, "secondary", "") if getattr(ctx.understanding, "intent", None) else ""
+        
         needs_eval = (
             bool(ctx.file_context) or 
             ctx.is_deep_research or 
             bool(ctx.web_context) or 
-            intent_val in ["document_analysis", "financial", "research", "calculation"]
+            intent_secondary in ["document_analysis", "financial", "research", "calculation", "calculate", "analyze"] or
+            intent_primary in ["problem_solving", "decision_support", "comparison"]
         )
 
         if needs_eval:
@@ -906,6 +909,8 @@ CRITICAL: Do NOT print these internal concepts as literal markdown headings in y
                         revision_instruction += f"Source evidence:\n{ctx.file_context}\n\n"
                     if ctx.web_context:
                         revision_instruction += f"Web evidence:\n{ctx.web_context}\n\n"
+                    if ctx.memory_context:
+                        revision_instruction += f"Memory evidence:\n{ctx.memory_context}\n\n"
                         
                     revision_instruction += f"Draft response:\n{generated_response}\n\n"
                     revision_instruction += "Revise the draft to better address the original request using ONLY the available evidence."
@@ -1042,12 +1047,15 @@ CRITICAL: Do NOT print these internal concepts as literal markdown headings in y
 
         try:
             # Fix #27 & #39: Use different modes based on risk/grounding necessity.
-            intent_val = getattr(ctx.understanding.intent, "primary", "") if getattr(ctx.understanding, "intent", None) else ""
+            intent_primary = getattr(ctx.understanding.intent, "primary", "") if getattr(ctx.understanding, "intent", None) else ""
+            intent_secondary = getattr(ctx.understanding.intent, "secondary", "") if getattr(ctx.understanding, "intent", None) else ""
+            
             needs_evaluation = (
                 bool(ctx.file_context) or 
                 ctx.is_deep_research or 
                 bool(ctx.web_context) or 
-                intent_val in ["document_analysis", "financial", "research", "calculation"]
+                intent_secondary in ["document_analysis", "financial", "research", "calculation", "calculate", "analyze"] or
+                intent_primary in ["problem_solving", "decision_support", "comparison"]
             )
 
             if needs_evaluation:
