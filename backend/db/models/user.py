@@ -12,6 +12,9 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column(String)
     display_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     avatar_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # IANA timezone string, e.g. "Asia/Kolkata", "America/New_York", "Europe/London".
+    # NULL means fall back to UTC. Used by execution_manager to localise time display.
+    timezone: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_superuser: Mapped[bool] = mapped_column(Boolean, default=False)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
