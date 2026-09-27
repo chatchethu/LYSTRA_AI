@@ -1,3 +1,21 @@
+"""
+Tool Routing Engine for LYSTRA.
+
+Architecture:
+  - Only two deterministic checks remain:
+      1. Empty message → no-op (architecturally safe)
+      2. Lystra self-identity phrases → NO_WEB (safe: these are static and never need web)
+  - Everything else is evaluated by the LLM using full semantic context.
+  - The LLM receives: current timestamp, recent history, the user message, and a rich
+    SemanticUnderstanding object already produced by the semantic analyzer.
+  - The LLM generates 1–3 optimised search queries when web search is needed.
+
+Design rules:
+  - NO hardcoded keyword arrays for routing decisions.
+  - NO deterministic heuristics for "casual", "entertainment", "explanations", etc.
+  - The AI thinks. We validate and sanitise its output.
+"""
+
 import json
 import asyncio
 from datetime import datetime, timezone
@@ -8,14 +26,16 @@ import structlog
 
 from backend.config import get_settings
 from backend.lystra.routing.terms import (
-    USER_IDENTITY_TERMS,
-    IDENTITY_TERMS,
-    DEEP_RESEARCH_TERMS,
-    contains_term as _contains_term,
     build_search_query as _build_search_query,
+    contains_term as _contains_term,
 )
 
 logger = structlog.get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Enums & Data Models
+# ---------------------------------------------------------------------------
 
 class RoutePriority(str, Enum):
     IDENTITY = "IDENTITY"
@@ -24,11 +44,13 @@ class RoutePriority(str, Enum):
     TASK = "TASK"
     TOOL = "TOOL"
 
+
 class WebSearchPolicy(str, Enum):
     MANDATORY_WEB = "MANDATORY_WEB"
     DEEP_RESEARCH = "DEEP_RESEARCH"
     OPTIONAL_WEB = "OPTIONAL_WEB"
     NO_WEB = "NO_WEB"
+
 
 class ToolRoutingDecision(BaseModel):
     web_policy: WebSearchPolicy
@@ -36,11 +58,18 @@ class ToolRoutingDecision(BaseModel):
     route_priority: RoutePriority = RoutePriority.TASK
     confidence: float = Field(default=0.9, ge=0.0, le=1.0)
     search_queries: Optional[List[str]] = None
-    
+
     @model_validator(mode="after")
-    def enforce_consistency(self):
-        # IDENTITY, CONVERSATION, and PERSONAL always NO_WEB
-        if self.route_priority in (RoutePriority.IDENTITY, RoutePriority.CONVERSATION, RoutePriority.PERSONAL):
+    def enforce_consistency(self) -> "ToolRoutingDecision":
+        """
+        Architectural invariant: IDENTITY, CONVERSATION, PERSONAL never trigger web search.
+        If the LLM somehow sets web_policy=MANDATORY_WEB on a greeting, this corrects it.
+        """
+        if self.route_priority in (
+            RoutePriority.IDENTITY,
+            RoutePriority.CONVERSATION,
+            RoutePriority.PERSONAL,
+        ):
             if self.web_policy != WebSearchPolicy.NO_WEB:
                 logger.info(
                     "tool_router_policy_override",
@@ -51,178 +80,278 @@ class ToolRoutingDecision(BaseModel):
             self.search_queries = None
         return self
 
-# Fix #3: Added explicit rule for User's own identity mapped to PERSONAL.
-_ROUTER_PROMPT = """You are the Tool Routing Engine for LYSTRA.
-Current Date and Time: {current_time}
-Your job is to decide whether a web search is required to answer the user's message.
 
-ROUTING PRIORITY
-1. Internal LYSTRA identity ("who are you") → NO_WEB, route=IDENTITY
-2. Ordinary casual conversation, greetings → NO_WEB, route=CONVERSATION  
-3. User's own identity/memory ("who am I", "my preferences") → NO_WEB, route=PERSONAL
-4. Personal/emotional sharing → NO_WEB, route=PERSONAL
-5. Explaining stable/universal concepts (recursion, sorting, gravity) → NO_WEB, route=TASK
-6. Movie, music, book, food, place, travel, or entertainment recommendations → MANDATORY_WEB, route=TOOL
-   (Regional content especially — Kannada, Tamil, Telugu, Malayalam, Hindi movies/shows/songs)
-   (LLM knowledge of regional entertainment is unreliable — always search for accurate results)
-7. News, current events, prices, stocks, weather, sports results → MANDATORY_WEB, route=TOOL
-8. Any other external/factual information that benefits from accuracy → OPTIONAL_WEB, route=TOOL
-9. Deep research requested explicitly → DEEP_RESEARCH, route=TOOL
+# ---------------------------------------------------------------------------
+# LLM Prompt
+# ---------------------------------------------------------------------------
 
-Do not use WEB merely because the user asked a 'what', 'who', 'where' question.
-Use WEB only when the answer requires current or external information, or regional-specific content.
-NEVER search the web for questions about the user's personal identity (e.g. 'who am i', 'what is my name', 'do you know me'). This is answered natively from internal DB memory.
+_ROUTER_PROMPT = """\
+You are the intelligent Tool Routing Engine for LYSTRA AI.
+Current Date and Time: {current_time} ({day_of_week})
 
-Recent Conversation Context:
-<untrusted_history>
+Your task is to analyse the user's message and decide:
+  1. Whether a web search is needed.
+  2. If yes, what highly-targeted search queries to run.
+
+== ROUTING FRAMEWORK ==
+
+Use the following framework to reason — do not pattern-match keywords:
+
+NO_WEB situations (answer from memory / reasoning alone):
+  - The user is just chatting, greeting, or sharing personal feelings.
+  - The user asks about Lystra's own identity, capabilities, or origin.
+  - The user asks about their own stored identity ("who am i", "my name", "my preferences").
+  - The question is about a timeless concept or skill (maths, algorithms, grammar, logic).
+  - The user asks what date/time it is — you know it from the timestamp above.
+
+MANDATORY_WEB situations (must fetch fresh external data):
+  - Movie, music, book, game, or entertainment recommendations (especially regional: Kannada,
+    Tamil, Telugu, Malayalam, Hindi, Bollywood). LLM knowledge of these is unreliable.
+  - News, current events, recent sports results, election outcomes, breaking stories.
+  - Live prices: stocks, crypto, commodities, product prices.
+  - Weather, forecasts, air quality, travel advisories.
+  - Tutorials, learning resources, courses, documentation — if the user asks where to start
+    learning something, search for the best current resources, roadmaps, and sites.
+  - Software versions, release notes, changelogs, API references.
+  - Restaurants, places to visit, hotels, local services.
+  - Any topic where your training data may be outdated or wrong.
+
+OPTIONAL_WEB situations (search to improve accuracy, not strictly required):
+  - General factual questions where you have some knowledge but freshness adds value.
+  - Research-adjacent queries where a cited source improves trustworthiness.
+
+DEEP_RESEARCH situations:
+  - The user explicitly asks for a comprehensive report, in-depth analysis, or deep research.
+
+== SEARCH QUERY GENERATION ==
+
+When web search is needed, generate 1–3 highly targeted search queries:
+  - Write like a skilled researcher typing into Google, not like a conversational question.
+  - Be specific and concise. Prefer keyword-rich queries over full sentences.
+  - Include the current year ({current_year}) only when recency genuinely matters.
+  - Decompose multi-part questions into separate targeted queries.
+  - For learning resources, include words like "roadmap", "best resources", "beginner guide",
+    "free tutorials", "top courses" as appropriate.
+  - For regional entertainment, include the language name and year range.
+  - NEVER copy this prompt text into a query.
+  - NEVER use placeholder text like "query 1" or "search string here".
+
+== CONTEXT ==
+
+Recent conversation:
+<history>
 {history}
-</untrusted_history>
+</history>
 
-User message: <untrusted_message>{message}</untrusted_message>
+Current user message:
+<message>{message}</message>
 
-Semantic Analysis of the User Message:
-<semantic_data>
+Semantic analysis already performed on this message:
+<semantic_understanding>
 {understanding}
-</semantic_data>
+</semantic_understanding>
 
-Output ONLY a JSON object (no explanation, no markdown):
+== OUTPUT ==
+
+Respond with ONLY a JSON object — no explanation, no markdown, no prose:
 {{
     "web_policy": "MANDATORY_WEB | OPTIONAL_WEB | NO_WEB | DEEP_RESEARCH",
-    "search_queries": ["query 1", "query 2"] if web_policy needs web search else null,
-    "reasoning": "one sentence justification",
     "route_priority": "TOOL | TASK | CONVERSATION | IDENTITY | PERSONAL",
-    "confidence": 0.9
+    "search_queries": ["query 1", "query 2"] or null,
+    "reasoning": "one concise sentence explaining this decision",
+    "confidence": 0.0
 }}
 
-IMPORTANT rules for search_queries:
-- If web_policy is NO_WEB → set search_queries to null (not a string, the JSON null value)
-- If web_policy requires web search → write 1 to 3 highly optimized search queries to get the best information.
-- Break down complex conversational messages into targeted factual search queries. Use the current year ({current_year}) for recency if applicable.
-- Example: User says "i need to learn hacking so from where i need to start" -> search_queries: ["best resources to learn ethical hacking for beginners", "ethical hacking roadmap for beginners {current_year}", "top websites to practice hacking legally"]
-- NEVER copy this instruction text into search_queries
+Rules:
+  - "search_queries" must be null if "web_policy" is "NO_WEB".
+  - "search_queries" must be a non-empty list if web search is needed.
+  - "confidence" is a float between 0.0 and 1.0 reflecting how certain you are.
 """
 
-_HISTORY_WINDOW = 3
+_HISTORY_WINDOW = 5  # slightly wider window for better contextual decisions
 
-def _validate_search_queries(queries: List[str], max_len: int = 200) -> List[str]:
-    valid_queries = []
-    _PLACEHOLDER_MARKERS = [
-        "optimized google search string",
-        "actual search query string",
-        "the actual search query",
-        "if needed, else null",
-        "search query string",
-        "query 1", "query 2"
-    ]
-    for q in queries:
-        if not isinstance(q, str):
+
+# ---------------------------------------------------------------------------
+# Query Validation
+# ---------------------------------------------------------------------------
+
+# These markers detect when the LLM accidentally copied prompt template text
+# into a query. Detected queries are dropped; if all are dropped, we fall back.
+_QUERY_TEMPLATE_MARKERS = frozenset([
+    "query 1", "query 2", "query 3",
+    "search string here", "optimized google search",
+    "actual search query", "the actual search query",
+    "if needed else null", "search query string",
+    "insert query here",
+])
+
+
+def _validate_search_queries(queries: List[str], max_len: int = 250) -> List[str]:
+    """
+    Validate and sanitise a list of LLM-generated search queries.
+    Drops empty strings, over-long strings, and obvious template placeholders.
+    Raises ValueError if nothing survives, so the caller can fall back gracefully.
+    """
+    valid: List[str] = []
+    for raw in queries:
+        if not isinstance(raw, str):
             continue
-        q = _build_search_query(q)
-        q = q.strip()[:max_len]
-        if not q:
+        q = raw.strip()
+        if not q or len(q) > max_len:
             continue
         q_lower = q.lower()
-        if any(marker in q_lower for marker in _PLACEHOLDER_MARKERS):
+        if any(marker in q_lower for marker in _QUERY_TEMPLATE_MARKERS):
+            logger.debug("tool_router_query_placeholder_dropped", query=q)
             continue
-        valid_queries.append(q)
-    if not valid_queries:
-        raise ValueError("empty or invalid search queries")
-    return valid_queries
+        valid.append(q)
+
+    if not valid:
+        raise ValueError("All generated search queries were empty or invalid placeholders.")
+    return valid
+
+
+# ---------------------------------------------------------------------------
+# Lystra self-identity check — the only static keyword guard remaining.
+# This is architecturally safe: these phrases unambiguously refer to Lystra itself
+# and will NEVER need a web search regardless of context.
+# ---------------------------------------------------------------------------
+
+_LYSTRA_SELF_IDENTITY_PHRASES = [
+    "who are you", "what are you", "tell me about yourself",
+    "are you an ai", "are you ai", "are you human", "are you a robot",
+    "are you alive", "what can you do", "who made you", "who created you",
+    "who built you", "your name", "introduce yourself", "what is lystra",
+    "what is your name", "are you lystra",
+]
+
+_USER_SELF_IDENTITY_PHRASES = [
+    "who am i", "what is my name", "do you know me", "what do you know about me",
+    "my details", "remember me", "my preferences", "about me", "know me",
+    "know about me", "about myself",
+]
+
+
+# ---------------------------------------------------------------------------
+# ToolRouter
+# ---------------------------------------------------------------------------
 
 class ToolRouter:
-    def __init__(self, llm_gateway):
+    """
+    Routes each turn to the appropriate handling strategy.
+
+    Fast-path (deterministic):
+      - Empty message → CONVERSATION / NO_WEB
+      - Lystra self-identity → IDENTITY / NO_WEB   (architecturally certain)
+      - User self-identity → PERSONAL / NO_WEB     (architecturally certain)
+      - Semantic understanding already signals casual/personal → NO_WEB
+
+    Slow-path (LLM):
+      - Everything else is evaluated by the LLM with full context.
+    """
+
+    def __init__(self, llm_gateway: Any):
         self.llm = llm_gateway
 
-    def _deterministic_route(self, message: str, understanding: Any = None) -> Optional[ToolRoutingDecision]:
-        if not message:
-            return ToolRoutingDecision(web_policy=WebSearchPolicy.NO_WEB, reasoning="Empty message.", route_priority=RoutePriority.CONVERSATION, confidence=1.0)
-            
+    # ------------------------------------------------------------------
+    # Deterministic fast-path
+    # ------------------------------------------------------------------
+
+    def _deterministic_route(
+        self,
+        message: str,
+        understanding: Any = None,
+    ) -> Optional[ToolRoutingDecision]:
+        """
+        Returns a ToolRoutingDecision only when the correct answer is
+        architecturally certain regardless of content. Returns None otherwise,
+        deferring to the LLM.
+        """
+        if not message or not message.strip():
+            return ToolRoutingDecision(
+                web_policy=WebSearchPolicy.NO_WEB,
+                reasoning="Empty message — nothing to route.",
+                route_priority=RoutePriority.CONVERSATION,
+                confidence=1.0,
+            )
+
         text = message.lower().strip()
-        
-        # 1. Identity check first
-        if _contains_term(text, USER_IDENTITY_TERMS):
-            result = ToolRoutingDecision(
+
+        # Lystra self-identity — always NO_WEB, always IDENTITY
+        if _contains_term(text, _LYSTRA_SELF_IDENTITY_PHRASES):
+            logger.info("tool_router_decision", intent="lystra_identity", web_policy="NO_WEB", confidence=1.0)
+            return ToolRoutingDecision(
                 web_policy=WebSearchPolicy.NO_WEB,
-                reasoning="User identity question — answered internally.",
-                route_priority=RoutePriority.PERSONAL,
-                confidence=1.0
-            )
-            logger.info("tool_router_decision", intent="user_identity", route="PERSONAL", web_policy="NO_WEB", confidence=1.0)
-            return result
-            
-        if _contains_term(text, IDENTITY_TERMS):
-            result = ToolRoutingDecision(
-                web_policy=WebSearchPolicy.NO_WEB,
-                reasoning="Identity question — answered internally.",
+                reasoning="Message refers to Lystra's own identity — answered internally.",
                 route_priority=RoutePriority.IDENTITY,
-                confidence=1.0
+                confidence=1.0,
             )
-            logger.info("tool_router_decision", intent="system_identity", route="IDENTITY", web_policy="NO_WEB", confidence=1.0)
-            return result
 
-        # 2. Deep Research explicitly requested
-        if _contains_term(text, DEEP_RESEARCH_TERMS):
-            result = ToolRoutingDecision(
-                web_policy=WebSearchPolicy.DEEP_RESEARCH,
-                reasoning="Explicit request for deep research.",
-                route_priority=RoutePriority.TOOL,
-                confidence=0.95,
-                search_queries=[_build_search_query(message)]
+        # User self-identity — always NO_WEB, answered from DB memory
+        if _contains_term(text, _USER_SELF_IDENTITY_PHRASES):
+            logger.info("tool_router_decision", intent="user_identity", web_policy="NO_WEB", confidence=1.0)
+            return ToolRoutingDecision(
+                web_policy=WebSearchPolicy.NO_WEB,
+                reasoning="Message refers to the user's own stored identity — answered from memory.",
+                route_priority=RoutePriority.PERSONAL,
+                confidence=1.0,
             )
-            logger.info("tool_router_decision", intent="deep_research", route="TOOL", web_policy="DEEP_RESEARCH", confidence=0.95)
-            return result
 
-        # 3. Understanding context check (Semantic NLU dynamic check)
-        # Fix #10: explicitly checking is not None.
-        if understanding is not None:
-            if getattr(understanding, "is_fallback", False):
-                logger.info("tool_router_ignoring_understanding", reason="semantic_analysis_fallback")
-            else:
-                raw_intent = getattr(understanding, "intent", "") or ""
-                intent = getattr(raw_intent, "primary", str(raw_intent))
-                speech_act = getattr(understanding, "speech_act", "") or ""
-                
-                CASUAL_INTENTS = {"greeting", "casual_conversation", "small_talk", "farewell", "social", "conversation"}
-                PERSONAL_INTENTS = {"emotional_support", "venting", "complaint", "personal_sharing"}
-                
-                if intent in CASUAL_INTENTS or speech_act in ("greeting", "farewell", "small_talk"):
-                    result = ToolRoutingDecision(
-                        web_policy=WebSearchPolicy.NO_WEB,
-                        reasoning=f"Casual conversation intent={intent}.",
-                        route_priority=RoutePriority.CONVERSATION,
-                        confidence=1.0
-                    )
-                    logger.info("tool_router_decision", intent=intent, route="CONVERSATION", web_policy="NO_WEB", confidence=1.0)
-                    return result
-                    
-                if intent in PERSONAL_INTENTS:
-                    result = ToolRoutingDecision(
-                        web_policy=WebSearchPolicy.NO_WEB,
-                        reasoning=f"Personal/emotional conversation intent={intent}.",
-                        route_priority=RoutePriority.PERSONAL,
-                        confidence=1.0
-                    )
-                    logger.info("tool_router_decision", intent=intent, route="PERSONAL", web_policy="NO_WEB", confidence=1.0)
-                    return result
-                    
-        return None
+        # SemanticUnderstanding already classified this as casual or personal — trust it
+        if understanding is not None and not getattr(understanding, "is_fallback", False):
+            raw_intent = getattr(understanding, "intent", "") or ""
+            intent = str(getattr(raw_intent, "primary", raw_intent)).lower()
+            speech_act = str(getattr(understanding, "speech_act", "") or "").lower()
+
+            _casual = {"greeting", "casual_conversation", "small_talk", "farewell", "social", "conversation", "chitchat"}
+            _personal = {"emotional_support", "venting", "complaint", "personal_sharing", "mental_health"}
+
+            if intent in _casual or speech_act in {"greeting", "farewell", "small_talk", "chitchat"}:
+                logger.info("tool_router_decision", intent=intent, web_policy="NO_WEB", confidence=1.0)
+                return ToolRoutingDecision(
+                    web_policy=WebSearchPolicy.NO_WEB,
+                    reasoning=f"Semantic analysis classified intent as casual ({intent}) — no web search needed.",
+                    route_priority=RoutePriority.CONVERSATION,
+                    confidence=1.0,
+                )
+
+            if intent in _personal:
+                logger.info("tool_router_decision", intent=intent, web_policy="NO_WEB", confidence=1.0)
+                return ToolRoutingDecision(
+                    web_policy=WebSearchPolicy.NO_WEB,
+                    reasoning=f"Semantic analysis classified intent as personal/emotional ({intent}) — no web search needed.",
+                    route_priority=RoutePriority.PERSONAL,
+                    confidence=1.0,
+                )
+
+        return None  # Defer to LLM
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     def _sanitize_for_prompt(self, text: str) -> str:
-        """Escape < and > to prevent early tag closure prompt injection."""
+        """Escape < and > to prevent prompt injection via untrusted content."""
         if not text:
             return ""
         return text.replace("<", "&lt;").replace(">", "&gt;")
 
-    # Fix #6: `history: list = None` changed to `history: Optional[list] = None`
-    async def route(self, message: str, history: Optional[list] = None, understanding: Any = None) -> ToolRoutingDecision:
-        # 1. Deterministic Fast-Path
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
+
+    async def route(
+        self,
+        message: str,
+        history: Optional[list] = None,
+        understanding: Any = None,
+    ) -> ToolRoutingDecision:
+        # 1. Fast-path: architecturally certain decisions
         decision = self._deterministic_route(message, understanding)
         if decision:
             return decision
 
-        # 2. LLM Evaluation Path
+        # 2. Slow-path: LLM evaluation
         settings = get_settings()
-        # Fix #4: Narrowed exception to avoid swallowing misconfiguration silently.
         try:
             model = settings.TOOL_ROUTING_MODEL
             timeout = settings.TOOL_ROUTING_TIMEOUT_S
@@ -232,114 +361,116 @@ class ToolRouter:
             timeout = 500.0
 
         history = history or []
-        history_text = "\n".join([str(h) for h in history[-_HISTORY_WINDOW:]])
-        
-        # Security: Escape tags
-        # Fix #7: Cap message to ~2000 chars before prompt insertion to avoid context bloat.
+        history_text = "\n".join(str(h) for h in history[-_HISTORY_WINDOW:])
+
+        # Cap message length to avoid context bloat
         capped_message = message[:2000]
         if len(message) > 2000:
-            logger.debug("tool_router_message_truncated", original_len=len(message), truncated_len=2000)
-        
+            logger.debug("tool_router_message_truncated", original_len=len(message))
+
+        # Sanitize untrusted inputs before prompt injection
         safe_history = self._sanitize_for_prompt(history_text)
         safe_message = self._sanitize_for_prompt(capped_message)
 
         if understanding is not None:
             try:
-                understanding_json = understanding.model_dump_json() if hasattr(understanding, "model_dump_json") else str(understanding)
+                understanding_json = (
+                    understanding.model_dump_json()
+                    if hasattr(understanding, "model_dump_json")
+                    else str(understanding)
+                )
             except Exception:
                 understanding_json = "{}"
         else:
             understanding_json = "{}"
-
-        # Fix #2: Sanitize understanding_json as well! If any string field has injection it could break out.
         understanding_json = self._sanitize_for_prompt(understanding_json)
 
         now = datetime.now(timezone.utc)
         prompt = _ROUTER_PROMPT.format(
+            current_time=now.strftime("%Y-%m-%d %H:%M:%S UTC"),
+            day_of_week=now.strftime("%A"),
+            current_year=str(now.year),
             history=safe_history,
             message=safe_message,
             understanding=understanding_json,
-            current_time=now.strftime("%Y-%m-%d %H:%M:%S UTC"),
-            current_year=str(now.year)
         )
 
-        # Fix #8: Added a single retry attempt.
-        max_attempts = 2
-        for attempt in range(1, max_attempts + 1):
+        # LLM call with one retry
+        res: Optional[str] = None
+        for attempt in range(1, 3):
             try:
                 res = await asyncio.wait_for(
                     self.llm.chat(
                         messages=[{"role": "user", "content": prompt}],
                         model=model,
                         format="json",
-                        temperature=0.0
+                        temperature=0.0,
                     ),
-                    timeout=timeout
+                    timeout=timeout,
                 )
-                break  # Successful response, exit retry loop
+                break
             except asyncio.TimeoutError:
-                logger.warning("tool_router_llm_timeout", attempt=attempt, max_attempts=max_attempts)
-                if attempt == max_attempts:
-                    # Fix #11: Metrics counter logs (easy to grok for downstream aggregators)
-                    logger.info("tool_router_fallback_triggered", reason="timeout", web_policy="OPTIONAL_WEB")
+                logger.warning("tool_router_llm_timeout", attempt=attempt)
+                if attempt == 2:
+                    logger.info("tool_router_fallback_triggered", reason="timeout")
                     return ToolRoutingDecision(
                         web_policy=WebSearchPolicy.OPTIONAL_WEB,
-                        reasoning="Routing engine timed out. Defaulting to optional.",
+                        reasoning="Routing engine timed out — defaulting to optional web.",
                         route_priority=RoutePriority.TASK,
-                        confidence=0.3
+                        confidence=0.3,
                     )
                 await asyncio.sleep(0.5)
             except Exception as e:
-                logger.warning("tool_router_llm_network_error", error=str(e), attempt=attempt, max_attempts=max_attempts)
-                if attempt == max_attempts:
-                    logger.info("tool_router_fallback_triggered", reason="network_error", web_policy="OPTIONAL_WEB")
+                logger.warning("tool_router_llm_error", error=str(e), attempt=attempt)
+                if attempt == 2:
+                    logger.info("tool_router_fallback_triggered", reason="llm_error")
                     return ToolRoutingDecision(
                         web_policy=WebSearchPolicy.OPTIONAL_WEB,
-                        reasoning="Routing engine network error. Defaulting to optional.",
+                        reasoning="Routing engine error — defaulting to optional web.",
                         route_priority=RoutePriority.TASK,
-                        confidence=0.3
+                        confidence=0.3,
                     )
                 await asyncio.sleep(0.5)
 
+        # Parse JSON response
         try:
             data = json.loads(res)
-        except json.JSONDecodeError:
-            logger.warning("tool_router_invalid_json", raw_response=res[:500])
-            logger.info("tool_router_fallback_triggered", reason="invalid_json", web_policy="OPTIONAL_WEB")
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("tool_router_invalid_json", raw=str(res)[:500])
             return ToolRoutingDecision(
                 web_policy=WebSearchPolicy.OPTIONAL_WEB,
-                reasoning="LLM returned non-JSON output. Defaulting to optional.",
+                reasoning="Routing engine returned unparseable output — defaulting to optional web.",
                 route_priority=RoutePriority.TASK,
-                confidence=0.3
+                confidence=0.3,
             )
 
+        # Validate and build decision
         try:
             decision = ToolRoutingDecision(**data)
-            
-            # Security / Fix #5: Apply true validation to the search query.
-            # Security / Fix #5: Apply true validation to the search queries.
+
             if decision.search_queries:
                 try:
                     decision.search_queries = _validate_search_queries(decision.search_queries)
                 except ValueError as ve:
                     logger.warning("tool_router_search_queries_rejected", reason=str(ve))
-                    decision.search_queries = None  # falls back to raw user_message at call site
-                
-            # Fix #11: Clear structured logs that can be used for metrics tracking
+                    # Fallback: generate a single clean query from the raw message
+                    fallback_q = _build_search_query(message)
+                    decision.search_queries = [fallback_q] if fallback_q else None
+
             logger.info(
                 "tool_router_decision",
                 intent="llm_evaluated",
                 route=decision.route_priority.value,
                 web_policy=decision.web_policy.value,
-                confidence=decision.confidence
+                confidence=decision.confidence,
             )
             return decision
+
         except Exception as e:
-            logger.warning("tool_router_schema_error", error=str(e), raw_response=str(data)[:500])
-            logger.info("tool_router_fallback_triggered", reason="schema_error", web_policy="OPTIONAL_WEB")
+            logger.warning("tool_router_schema_error", error=str(e), raw=str(data)[:500])
             return ToolRoutingDecision(
                 web_policy=WebSearchPolicy.OPTIONAL_WEB,
-                reasoning="Routing engine schema error. Defaulting to optional.",
+                reasoning="Routing engine schema error — defaulting to optional web.",
                 route_priority=RoutePriority.TASK,
-                confidence=0.3
+                confidence=0.3,
             )
