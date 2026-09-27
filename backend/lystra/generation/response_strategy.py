@@ -103,6 +103,10 @@ class StrategyEngine:
             depth = DepthLevel.CONCISE
             tone = ToneType.WARM
             structure = ["paragraphs"]  # conversational → prose
+            # Casual conversations warrant warmer emoji presence
+            emoji_use = True
+            emoji_purpose = EmojiPurpose.ACKNOWLEDGMENT
+            emoji_intensity = EmojiIntensity.MEDIUM
 
         elif intent in PERSONAL_INTENTS:
             depth = DepthLevel.STANDARD
@@ -187,6 +191,19 @@ class StrategyEngine:
             emoji_use = True
             emoji_purpose = EmojiPurpose.CELEBRATION
             emoji_intensity = EmojiIntensity.HIGH if state_affinity == "high" else EmojiIntensity.MEDIUM
+
+        elif emotion == "positive":
+            # Positive emotion: use emojis naturally for warmth but keep it low-medium
+            emoji_use = True
+            emoji_purpose = EmojiPurpose.ACKNOWLEDGMENT
+            emoji_intensity = EmojiIntensity.MEDIUM
+
+        elif emotion == "humorous":
+            # Humorous context: emojis fit naturally here
+            tone = ToneType.WARM
+            emoji_use = True
+            emoji_purpose = EmojiPurpose.ACKNOWLEDGMENT
+            emoji_intensity = EmojiIntensity.MEDIUM
             
         elif emotion == "confused":
             tone = ToneType.WARM

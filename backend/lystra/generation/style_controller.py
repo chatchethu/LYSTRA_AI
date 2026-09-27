@@ -179,8 +179,12 @@ class StyleController:
             intensity = self._DEFAULT_INTENSITY.value
 
         return [
-            f"- EMOJI REQUIREMENT: Emojis are permitted. Purpose: {purpose}. Intensity: {intensity}.",
-            "- Do NOT mechanically append emojis at the very end. Place them naturally inline (e.g., opening, mid-sentence) where they best convey the semantic emotion."
+            f"- EMOJI REQUIREMENT: USE emojis naturally in this response. Intensity level: {intensity}. Purpose: {purpose}. "
+            "Place 1-2 emojis where they feel natural — at the start, inline, or after a warm statement. "
+            "Do NOT put all emojis at the very end. Examples of natural placement: "
+            "'Hey! 😊 Good to see you.' or 'That worked out nicely 🎉' or 'Yeah, that makes sense 👍'. "
+            "Do NOT skip emojis entirely — they are part of the conversational warmth for this response.",
+            "- Never use 5+ emojis in a row. Keep emoji use natural, not spammy."
         ]
 
     def _build_depth_directive(self, strategy: ResponseStrategy) -> str:
