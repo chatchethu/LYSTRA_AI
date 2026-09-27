@@ -37,6 +37,10 @@ class DBMemoryStorage:
             pool_pre_ping=True
         )
         self.LocalSession = async_sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
+        # Fix: DBMemoryStorage needs its own encryption instance because _map_db_to_objects
+        # calls self.encryption.decrypt(). Previously this was only on MemoryManager,
+        # causing 'DBMemoryStorage has no attribute encryption' warnings on every memory fetch.
+        self.encryption = MemoryEncryption()
 
     async def dispose(self):
         """Must be called to close the DB engine connections before the event loop closes."""

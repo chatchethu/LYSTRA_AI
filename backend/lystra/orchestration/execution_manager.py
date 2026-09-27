@@ -152,7 +152,10 @@ class ExecutionManager:
                 if user:
                     name = user.display_name or user.username
                     if name:
-                        return f"The user's account name is {name}. You already know them, address them naturally."
+                        # Return just the raw name — the identity block is built by the caller.
+                        # Returning a sentence here leaked that sentence into log fields like
+                        # verified_name and caused the noisy log entries.
+                        return name.strip()
         except Exception as e:
             logger.error("get_user_account_info_failed", user_id=str(user_id), error=str(e))
         return ""
@@ -367,13 +370,13 @@ class ExecutionManager:
         if account_info:
             identity_block = f"""
 [VERIFIED IDENTITY — AUTHORITATIVE]
-{account_info}
-CRITICAL RULES about this name (PHASE 10):
+The user's name is: {account_info}
+CRITICAL RULES about this name:
 - This name comes from the user's verified account. It is ground truth.
 - NEVER use a different name from memory or conversation history.
-- Use the name occasionally for conversational warmth (e.g., "Nice, [name]. That change should solve it.").
+- Use the name occasionally for conversational warmth (e.g., "Nice, {account_info}. That change should solve it.").
 - Do NOT use it in every single response.
-- Do NOT always put it at the very beginning (e.g., avoid always saying "Hi [name]", "Sure [name]").
+- Do NOT always put it at the very beginning (e.g., avoid always saying "Hi {account_info}", "Sure {account_info}").
 - Let name usage be determined by conversational context. Sometimes just say "Sure — let's fix that." without a name.
 """
 
@@ -485,12 +488,12 @@ CRITICAL MEMORY RULES:
                 file_context_str += "</UNTRUSTED_DOCUMENT_DATA>\n"
                 
                 # Phase 44: Contextual awareness updating
-                state_manager._state.active_files = list(set([c['filename'] for c in file_chunks]))
-                state_manager._state.previous_file_question = user_message
+                state_mgr._state.active_files = list(set([c['filename'] for c in file_chunks]))
+                state_mgr._state.previous_file_question = user_message
                 
                 # If secondary intent is known, lock it into the active state task
                 if getattr(understanding, "intent", None) and getattr(understanding.intent, "secondary", None):
-                    state_manager._state.current_analysis_task = understanding.intent.secondary
+                    state_mgr._state.current_analysis_task = understanding.intent.secondary
                 
         except Exception as e:
             logger.error("file_retrieval_failed", error=str(e))
