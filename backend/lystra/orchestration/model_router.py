@@ -55,6 +55,13 @@ class ModelRouter:
         """Returns a fallback model from available_models that is not the primary model."""
         return next((m for m in self.available_models if m != primary_model), None)
 
+    def get_vision_model(self) -> Optional[str]:
+        """Returns a vision-capable model if available, else default."""
+        for m in (self.available_models or [self.default_model]):
+            if self._get_capabilities(m).get("vision", False):
+                return m
+        return self.default_model
+
     def route(self, understanding: SemanticUnderstanding, context_length: int) -> RoutingDecision:
         """
         Phase 11 & 12: Dynamic Model Routing
