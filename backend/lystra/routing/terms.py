@@ -12,54 +12,8 @@ IDENTITY_TERMS = [
     "who made you", "your name", "introduce yourself", "lystra"
 ]
 
-CASUAL_TERMS = [
-    "hi", "hello", "hey", "morning", "good morning", "good evening",
-    "how are you", "what's up", "sup", "yo", "thanks", "thank you",
-    "okay", "ok", "bye", "goodbye", "see you"
-]
-
-# Note: Explicit phrase matching for emotions ("i am sad", "i feel") 
-# was requested to be removed to prevent hardcoded brittleness.
-# We keep the array empty or minimal, relying on Semantic Analyzer.
-PERSONAL_TERMS = []
-
-MANDATORY_WEB_TERMS = [
-    "latest", "current", "today", "recent", "news", "price",
-    "availability", "version", "launch", "released", "stock", "weather"
-]
-
-# Entertainment recommendations always need web search — LLM knowledge of
-# regional movies, songs, and shows is unreliable and causes hallucinations.
-ENTERTAINMENT_WEB_TERMS = [
-    # Movie/show triggers
-    "movies", "movie", "films", "film", "web series", "series", "shows", "show",
-    "watch", "streaming", "ott", "netflix", "amazon prime", "hotstar",
-    # Music triggers
-    "songs", "song", "music", "album", "singer", "artist", "playlist",
-    # Regional keywords that the LLM hallucinates badly
-    "kannada", "tamil", "telugu", "malayalam", "bollywood", "tollywood",
-    "kollywood", "sandalwood",
-    # Recommendation/suggestion triggers
-    "recommend", "suggest", "suggestion", "recommendations",
-    "what to watch", "should i watch", "worth watching",
-    # Food/place recommendations
-    "restaurants", "restaurant", "places to visit", "tourist", "travel",
-]
-
 DEEP_RESEARCH_TERMS = [
     "deep research", "comprehensive analysis", "write a report on"
-]
-
-STATIC_EXPLANATION_PREFIXES = [
-    "explain ",
-    "define ",
-    "what does ",
-    "how does ",
-    "why does ",
-    "what time",
-    "what day",
-    "what is the date",
-    "what is today"
 ]
 
 _FILLER_RE = re.compile(

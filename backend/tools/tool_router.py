@@ -11,11 +11,6 @@ from backend.lystra.routing.terms import (
     USER_IDENTITY_TERMS,
     IDENTITY_TERMS,
     DEEP_RESEARCH_TERMS,
-    STATIC_EXPLANATION_PREFIXES,
-    MANDATORY_WEB_TERMS,
-    ENTERTAINMENT_WEB_TERMS,
-    CASUAL_TERMS,
-    PERSONAL_TERMS,
     contains_term as _contains_term,
     build_search_query as _build_search_query,
 )
@@ -177,33 +172,7 @@ class ToolRouter:
             logger.info("tool_router_decision", intent="deep_research", route="TOOL", web_policy="DEEP_RESEARCH", confidence=0.95)
             return result
 
-        # Fix #1: Date/time is always local — check BEFORE generic mandatory web terms like "today".
-        if any(text.startswith(p) for p in ("what time", "what day", "what is the date", "what is today")):
-            result = ToolRoutingDecision(
-                web_policy=WebSearchPolicy.NO_WEB,
-                reasoning="Date/time query answered from system clock, not web.",
-                route_priority=RoutePriority.TASK,
-                confidence=1.0,
-            )
-            logger.info("tool_router_decision", intent="date_time_local", route="TASK", web_policy="NO_WEB", confidence=1.0)
-            return result
-
-        # 3. (Removed: MANDATORY_WEB and ENTERTAINMENT_WEB deterministic paths)
-        # We now rely on the LLM router for these so it can generate a clean, optimized
-        # search query instead of passing the user's conversational typo-filled message directly to the search engine.
-
-        # 4. Stable conceptual explanations check
-        if any(text.startswith(prefix) for prefix in STATIC_EXPLANATION_PREFIXES):
-            result = ToolRoutingDecision(
-                web_policy=WebSearchPolicy.NO_WEB,
-                reasoning="Stable conceptual explanation does not require web search.",
-                route_priority=RoutePriority.TASK,
-                confidence=0.95,
-            )
-            logger.info("tool_router_decision", intent="stable_explanation", route="TASK", web_policy="NO_WEB", confidence=0.95)
-            return result
-
-        # 5. Understanding context check (Semantic NLU dynamic check)
+        # 3. Understanding context check (Semantic NLU dynamic check)
         # Fix #10: explicitly checking is not None.
         if understanding is not None:
             if getattr(understanding, "is_fallback", False):
@@ -235,30 +204,7 @@ class ToolRouter:
                     )
                     logger.info("tool_router_decision", intent=intent, route="PERSONAL", web_policy="NO_WEB", confidence=1.0)
                     return result
-                
-        # 6. Heuristic casual check (Fallbacks if intent parsing failed but keywords match)
-        if _contains_term(text, CASUAL_TERMS):
-            result = ToolRoutingDecision(
-                web_policy=WebSearchPolicy.NO_WEB,
-                reasoning="Casual greeting matched.",
-                route_priority=RoutePriority.CONVERSATION,
-                confidence=0.9
-            )
-            logger.info("tool_router_decision", intent="casual_match", route="CONVERSATION", web_policy="NO_WEB", confidence=0.9)
-            return result
-
-        # Fix #9: Document dead code explicitly.
-        # TODO: currently unreachable — PERSONAL_TERMS is empty pending semantic analyzer rollout.
-        if _contains_term(text, PERSONAL_TERMS):
-            result = ToolRoutingDecision(
-                web_policy=WebSearchPolicy.NO_WEB,
-                reasoning="Personal/emotional content matched.",
-                route_priority=RoutePriority.PERSONAL,
-                confidence=0.9
-            )
-            logger.info("tool_router_decision", intent="personal_match", route="PERSONAL", web_policy="NO_WEB", confidence=0.9)
-            return result
-
+                    
         return None
 
     def _sanitize_for_prompt(self, text: str) -> str:
