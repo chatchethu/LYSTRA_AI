@@ -53,6 +53,15 @@ MAX_USER_REQUEST_CHARS  = 8_000    # ~2k tokens
 # ~6k tokens reserved for output
 
 
+@dataclass
+class StreamEvent:
+    """Fix #28: Typed stream events to differentiate progress from actual LLM content."""
+    type: str  # progress, token, error, done
+    content: str
+
+    def to_json(self) -> str:
+        return json.dumps({"type": self.type, "content": self.content})
+
 @dataclass(frozen=True)
 class TurnContext:
     understanding: SemanticUnderstanding
@@ -557,22 +566,48 @@ class ExecutionManager:
                     ),
                     timeout=settings.TOOL_ROUTING_TIMEOUT_S,
                 )
-                if tool_decision.web_policy in [
-                    WebSearchPolicy.MANDATORY_WEB,
-                    WebSearchPolicy.OPTIONAL_WEB,
-                    WebSearchPolicy.DEEP_RESEARCH,
-                ]:
+                # Fix #33: Validate search queries
+                valid_queries = [
+                    q.strip()
+                    for q in (tool_decision.search_queries or [])
+                    if q and q.strip()
+                ][:5]
+                
+                # Fix #31 & #32: Tool-routing policies logic
+                if tool_decision.web_policy == WebSearchPolicy.DEEP_RESEARCH:
+                    # Uses progressive deep research instead of standard search
+                    is_deep_research = True
+                    dr_query = valid_queries[0] if valid_queries else user_message
+                    web_context_raw = await self._run_deep_research(dr_query, user_id, stream_callback)
+                    if web_context_raw:
+                        web_context = self._sanitize_untrusted(web_context_raw)
+                
+                elif tool_decision.web_policy == WebSearchPolicy.MANDATORY_WEB:
+                    if not valid_queries:
+                        valid_queries = [user_message.strip()]
+                    
                     search_result = await asyncio.wait_for(
-                        self.web_search_tool.execute(
-                            user_id=user_id_str,
-                            queries=tool_decision.search_queries or [user_message],
-                        ),
+                        self.web_search_tool.execute(user_id=user_id_str, queries=valid_queries),
                         timeout=WEB_SEARCH_TIMEOUT_SECONDS,
                     )
                     if search_result.success and search_result.data:
                         web_context = self._sanitize_untrusted(search_result.data.get("formatted", ""))
                     else:
-                        logger.warning("web_search_failed", error=search_result.error, query=user_message)
+                        logger.warning("web_search_failed", error=search_result.error, queries=valid_queries)
+                        
+                elif tool_decision.web_policy == WebSearchPolicy.OPTIONAL_WEB:
+                    # Fix #31: Differentiate optional web search
+                    # Only search if freshness/relevance threshold explicitly warrants it
+                    # e.g., low confidence in understanding, or explicit search queries generated.
+                    if valid_queries and getattr(understanding, "confidence", 1.0) < 0.85:
+                        search_result = await asyncio.wait_for(
+                            self.web_search_tool.execute(user_id=user_id_str, queries=valid_queries),
+                            timeout=WEB_SEARCH_TIMEOUT_SECONDS,
+                        )
+                        if search_result.success and search_result.data:
+                            web_context = self._sanitize_untrusted(search_result.data.get("formatted", ""))
+                        else:
+                            logger.warning("optional_web_search_failed", error=search_result.error)
             except asyncio.TimeoutError:
                 logger.error("tool_routing_timed_out", query=user_message)
             except Exception as e:
@@ -976,65 +1011,82 @@ CRITICAL: Do NOT print these internal concepts (e.g. "active_goal", "current_top
             done, _ = await asyncio.wait({prep_task, get_task}, return_when=asyncio.FIRST_COMPLETED)
             if get_task in done:
                 try:
-                    yield get_task.result()
+                    # Fix #28: Typed stream events (progress)
+                    res = get_task.result()
+                    yield StreamEvent(type="progress", content=res).to_json()
                 except Exception:
                     pass
                 get_task = asyncio.create_task(progress_queue.get())
             if prep_task in done:
+                # Fix #29: Properly handle cancellation
                 get_task.cancel()
                 try:
                     await get_task
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
                     pass
                 break
 
-        # Retrieve result — raise cleanly so run.failed SSE fires and no broken
-        # assistant message is persisted to the DB.
         try:
             ctx = prep_task.result()
         except asyncio.TimeoutError:
             logger.error("prepare_turn_timed_out_stream", user_id=str(user_id))
+            yield StreamEvent(type="error", content="prepare_turn_timed_out").to_json()
             raise RuntimeError("prepare_turn_timed_out")
         except Exception as e:
             logger.error("prepare_turn_failed", error=str(e))
+            yield StreamEvent(type="error", content="prepare_turn_failed").to_json()
             raise RuntimeError("prepare_turn_failed") from e
 
-        # Drain any remaining progress events
         while not progress_queue.empty():
-            yield progress_queue.get_nowait()
+            yield StreamEvent(type="progress", content=progress_queue.get_nowait()).to_json()
 
         if ctx.ambiguity_message:
-            yield ctx.ambiguity_message
+            yield StreamEvent(type="token", content=ctx.ambiguity_message).to_json()
+            yield StreamEvent(type="done", content="").to_json()
             return
 
-        # Fix #4: Explicit None guard in streaming path
         if ctx.route is None:
             raise RuntimeError("Missing routing decision after prepare_turn")
 
         messages = self._build_messages(ctx, user_message, chat_history)
 
-        # Fix #26: Unified streaming generation and validation
-        # By buffering the stream, we enforce identical quality evaluations for both execution modes.
         try:
-            # Yield a visual cue so the stream UX remains responsive
-            yield "🔄 Generating draft response...\n"
+            # Fix #27: Use different modes based on risk/grounding necessity.
+            # Document-grounded/High-risk: Generate -> Evaluate -> Revise -> Stream Final
+            needs_evaluation = bool(ctx.file_context) or ctx.is_deep_research
 
-            draft_chunks = []
-            async for chunk in self._llm_stream_with_fallback(
-                messages=messages,
-                primary_model=ctx.route.selected_model,
-            ):
-                draft_chunks.append(chunk)
+            if needs_evaluation:
+                yield StreamEvent(type="progress", content="Generating draft response...").to_json()
+                draft_chunks = []
+                async for chunk in self._llm_stream_with_fallback(
+                    messages=messages,
+                    primary_model=ctx.route.selected_model,
+                ):
+                    draft_chunks.append(chunk)
 
-            generated_response = "".join(draft_chunks)
-            yield "🔄 Evaluating response quality...\n"
+                generated_response = "".join(draft_chunks)
+                yield StreamEvent(type="progress", content="Evaluating response quality...").to_json()
 
-            final_response = await self._post_process_response(generated_response, user_message, ctx)
-            
-            # Clear the progress text and yield the fully evaluated response
-            yield "\r" + " " * 40 + "\r"  # Erase the progress line
-            yield final_response
+                final_response = await self._post_process_response(generated_response, user_message, ctx)
+                yield StreamEvent(type="token", content=final_response).to_json()
 
+            else:
+                # Normal chat mode: Stream immediately (less latency, evaluation bypassed for chat)
+                async for chunk in self._llm_stream_with_fallback(
+                    messages=messages,
+                    primary_model=ctx.route.selected_model,
+                ):
+                    yield StreamEvent(type="token", content=chunk).to_json()
+
+            yield StreamEvent(type="done", content="").to_json()
+
+        except asyncio.CancelledError:
+            # Fix #30: If client disconnects, generation is cleanly cancelled and logged.
+            logger.info("stream_cancelled")
+            raise
         except RuntimeError as e:
             logger.error("llm_stream_totally_failed", error=str(e))
+            yield StreamEvent(type="error", content="LLM generation failed").to_json()
             raise
