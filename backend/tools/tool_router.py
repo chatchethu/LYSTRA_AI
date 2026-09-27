@@ -1,7 +1,7 @@
 import json
 import asyncio
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, List
 from pydantic import BaseModel, Field, model_validator
 import structlog
 
@@ -39,7 +39,7 @@ class ToolRoutingDecision(BaseModel):
     reasoning: str
     route_priority: RoutePriority = RoutePriority.TASK
     confidence: float = Field(default=0.9, ge=0.0, le=1.0)
-    search_query: Optional[str] = None
+    search_queries: Optional[List[str]] = None
     
     @model_validator(mode="after")
     def enforce_consistency(self):
@@ -52,7 +52,7 @@ class ToolRoutingDecision(BaseModel):
                     route_priority=self.route_priority.value,
                 )
             self.web_policy = WebSearchPolicy.NO_WEB
-            self.search_query = None
+            self.search_queries = None
         return self
 
 # Fix #3: Added explicit rule for User's own identity mapped to PERSONAL.
@@ -91,41 +91,46 @@ Semantic Analysis of the User Message:
 Output ONLY a JSON object (no explanation, no markdown):
 {{
     "web_policy": "MANDATORY_WEB | OPTIONAL_WEB | NO_WEB | DEEP_RESEARCH",
-    "search_query": "the actual search query string, or null if web_policy is NO_WEB",
+    "search_queries": ["query 1", "query 2"] if web_policy needs web search else null,
     "reasoning": "one sentence justification",
     "route_priority": "TOOL | TASK | CONVERSATION | IDENTITY | PERSONAL",
     "confidence": 0.9
 }}
 
-IMPORTANT rules for search_query:
-- If web_policy is NO_WEB → set search_query to null (not a string, the JSON null value)
-- If web_policy requires web search → write a real, specific search query based on the user message
-- NEVER copy this instruction text into search_query
-- BAD example: "optimized google search string if needed"
-- GOOD example: "best Kannada movies 2023 2024 to watch"
+IMPORTANT rules for search_queries:
+- If web_policy is NO_WEB → set search_queries to null (not a string, the JSON null value)
+- If web_policy requires web search → write 1 to 3 highly optimized search queries to get the best information.
+- Break down complex conversational messages into targeted factual search queries.
+- Example: User says "i need to learn hacking so from where i need to start" -> search_queries: ["best resources to learn ethical hacking for beginners", "ethical hacking roadmap for beginners 2024", "top websites to practice hacking legally"]
+- NEVER copy this instruction text into search_queries
 """
 
 _HISTORY_WINDOW = 3
 
-# Fix #5: Validator for search query.
-def _validate_search_query(q: str, max_len: int = 200) -> str:
-    q = _build_search_query(q)
-    q = q.strip()[:max_len]
-    if not q:
-        raise ValueError("empty search query")
-    # Reject placeholder text that the LLM sometimes copies verbatim from the prompt example
+def _validate_search_queries(queries: List[str], max_len: int = 200) -> List[str]:
+    valid_queries = []
     _PLACEHOLDER_MARKERS = [
         "optimized google search string",
         "actual search query string",
         "the actual search query",
         "if needed, else null",
         "search query string",
+        "query 1", "query 2"
     ]
-    q_lower = q.lower()
-    for marker in _PLACEHOLDER_MARKERS:
-        if marker in q_lower:
-            raise ValueError(f"search_query looks like a template placeholder: {q!r}")
-    return q
+    for q in queries:
+        if not isinstance(q, str):
+            continue
+        q = _build_search_query(q)
+        q = q.strip()[:max_len]
+        if not q:
+            continue
+        q_lower = q.lower()
+        if any(marker in q_lower for marker in _PLACEHOLDER_MARKERS):
+            continue
+        valid_queries.append(q)
+    if not valid_queries:
+        raise ValueError("empty or invalid search queries")
+    return valid_queries
 
 class ToolRouter:
     def __init__(self, llm_gateway):
@@ -165,7 +170,7 @@ class ToolRouter:
                 reasoning="Explicit request for deep research.",
                 route_priority=RoutePriority.TOOL,
                 confidence=0.95,
-                search_query=_build_search_query(message)
+                search_queries=[_build_search_query(message)]
             )
             logger.info("tool_router_decision", intent="deep_research", route="TOOL", web_policy="DEEP_RESEARCH", confidence=0.95)
             return result
@@ -361,12 +366,13 @@ class ToolRouter:
             decision = ToolRoutingDecision(**data)
             
             # Security / Fix #5: Apply true validation to the search query.
-            if decision.search_query:
+            # Security / Fix #5: Apply true validation to the search queries.
+            if decision.search_queries:
                 try:
-                    decision.search_query = _validate_search_query(decision.search_query)
+                    decision.search_queries = _validate_search_queries(decision.search_queries)
                 except ValueError as ve:
-                    logger.warning("tool_router_search_query_rejected", reason=str(ve))
-                    decision.search_query = None  # falls back to raw user_message at call site
+                    logger.warning("tool_router_search_queries_rejected", reason=str(ve))
+                    decision.search_queries = None  # falls back to raw user_message at call site
                 
             # Fix #11: Clear structured logs that can be used for metrics tracking
             logger.info(

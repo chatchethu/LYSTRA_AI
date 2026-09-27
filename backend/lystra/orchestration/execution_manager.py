@@ -303,12 +303,12 @@ class ExecutionManager:
                     search_result = await asyncio.wait_for(
                         self.web_search_tool.execute(
                             user_id=user_id_str, 
-                            query=tool_decision.search_query or user_message
+                            queries=tool_decision.search_queries or [user_message]
                         ),
                         timeout=WEB_SEARCH_TIMEOUT_SECONDS
                     )
-                    if search_result.success:
-                        web_context = self._sanitize_untrusted(search_result.content)
+                    if search_result.success and search_result.data:
+                        web_context = self._sanitize_untrusted(search_result.data.get("formatted", ""))
                     else:
                         logger.warning("web_search_failed", error=search_result.error, query=user_message)
             except asyncio.TimeoutError:
